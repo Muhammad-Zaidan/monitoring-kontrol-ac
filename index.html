@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KONTROL AC</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600;700&display=swap');
+  :root {
+    --bg:#0a0e17;--bg2:#111827;--bg3:#1a2234;--border:#1e3a5f;
+    --accent:#00c8ff;--accent2:#00ff9d;--accent3:#ff6b35;
+    --warn:#ffb700;--danger:#ff3b5c;--text:#c8d8e8;--text-dim:#4a6080;
+    --mono:'Share Tech Mono',monospace;--sans:'Barlow',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;min-height:100vh;overflow-x:hidden}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,200,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,200,255,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
+  .container{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:0 20px 40px}
+  header{display:flex;align-items:center;justify-content:space-between;padding:20px 0 16px;border-bottom:1px solid var(--border);margin-bottom:24px}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:40px;height:40px;border:2px solid var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:18px;color:var(--accent);box-shadow:0 0 16px rgba(0,200,255,0.3);animation:pulse 3s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 16px rgba(0,200,255,0.3)}50%{box-shadow:0 0 28px rgba(0,200,255,0.6)}}
+  .logo-text{font-family:var(--mono);font-size:20px;letter-spacing:4px;color:var(--accent)}
+  .logo-sub{font-size:11px;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
+  .header-right{display:flex;align-items:center;gap:20px}
+  .status-wifi{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 8px var(--accent2);animation:blink 2s ease-in-out infinite}
+  .dot.offline{background:var(--danger);box-shadow:0 0 8px var(--danger);animation:none}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+  .last-update{font-family:var(--mono);font-size:11px;color:var(--text-dim)}
+  .section-title{font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--text-dim);text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
+  .cards-row{display:grid;gap:12px;margin-bottom:24px}
+  .cards-4{grid-template-columns:repeat(4,1fr)}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;position:relative;overflow:hidden}
+  .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent);opacity:0.5}
+  .card.green::before{background:var(--accent2)}
+  .card.orange::before{background:var(--accent3)}
+  .card-label{font-size:10px;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px}
+  .card-value{font-family:var(--mono);font-size:28px;color:var(--accent);line-height:1;transition:color 0.3s}
+  .card.green .card-value{color:var(--accent2)}
+  .card.orange .card-value{color:var(--accent3)}
+  .card-unit{font-family:var(--mono);font-size:13px;color:var(--text-dim);margin-left:4px}
+  .slave-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:24px}
+  .slave-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px}
+  .slave-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+  .slave-name{font-family:var(--mono);font-size:14px;letter-spacing:2px;color:var(--accent)}
+  .badge{font-family:var(--mono);font-size:10px;letter-spacing:1px;padding:3px 8px;border-radius:4px;text-transform:uppercase}
+  .badge.online{background:rgba(0,255,157,0.15);color:var(--accent2);border:1px solid rgba(0,255,157,0.3)}
+  .badge.offline{background:rgba(255,59,92,0.15);color:var(--danger);border:1px solid rgba(255,59,92,0.3)}
+  .slave-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .metric{text-align:center}
+  .metric-val{font-family:var(--mono);font-size:22px;color:var(--text);line-height:1}
+  .metric-lbl{font-size:10px;color:var(--text-dim);letter-spacing:1px;margin-top:4px;text-transform:uppercase}
+  .metric-val.hot{color:var(--accent3)}.metric-val.cool{color:var(--accent)}.metric-val.green{color:var(--accent2)}
+  .pzem-table-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:24px}
+  .pzem-table-title{padding:12px 16px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--text-dim);text-transform:uppercase}
+  table{width:100%;border-collapse:collapse}
+  th{padding:10px 16px;text-align:left;font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;border-bottom:1px solid var(--border);background:var(--bg3)}
+  td{padding:12px 16px;font-family:var(--mono);font-size:14px;border-bottom:1px solid rgba(30,58,95,0.5)}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(0,200,255,0.03)}
+  .td-channel{color:var(--accent);letter-spacing:2px}.td-v{color:var(--accent2)}.td-i{color:var(--accent)}.td-p{color:var(--accent3)}.td-pf{color:var(--warn)}.td-e{color:var(--text-dim)}
+  .chart-filter{display:flex;gap:6px;margin-bottom:16px}
+  .filter-btn{font-family:var(--mono);font-size:11px;letter-spacing:2px;padding:5px 14px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--text-dim);cursor:pointer;transition:all 0.2s;text-transform:uppercase}
+  .filter-btn:hover,.filter-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(0,200,255,0.08)}
+  .charts-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+  .chart-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px}
+  .chart-title{font-family:var(--mono);font-size:11px;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;margin-bottom:12px}
+  .chart-wrap{position:relative;height:200px}
+  .loading-overlay{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999;transition:opacity 0.5s}
+  .loading-overlay.hidden{opacity:0;pointer-events:none}
+  .loading-logo{font-family:var(--mono);font-size:32px;letter-spacing:8px;color:var(--accent);margin-bottom:24px;animation:pulse 2s ease-in-out infinite}
+  .loading-bar-wrap{width:200px;height:2px;background:var(--border);border-radius:2px;overflow:hidden}
+  .loading-bar{height:100%;background:var(--accent);width:0%;animation:load 1.5s ease-in-out forwards;box-shadow:0 0 8px var(--accent)}
+  @keyframes load{0%{width:0%}100%{width:100%}}
+  .loading-text{font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--text-dim);margin-top:12px;text-transform:uppercase}
+  .error-banner{background:rgba(255,59,92,0.1);border:1px solid rgba(255,59,92,0.3);border-radius:6px;padding:12px 16px;font-family:var(--mono);font-size:12px;color:var(--danger);margin-bottom:16px;display:none}
+  .error-banner.show{display:block}
+  @media(max-width:900px){.cards-4{grid-template-columns:repeat(2,1fr)}.charts-grid{grid-template-columns:1fr}}
+  @media(max-width:600px){.cards-4{grid-template-columns:1fr}.slave-metrics{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-logo">KONTROL AC</div>
+  <div class="loading-bar-wrap"><div class="loading-bar"></div></div>
+  <div class="loading-text">Menghubungkan ke Firebase...</div>
+</div>
+<div class="container">
+  <header>
+    <div class="logo">
+      <div class="logo-icon">AC</div>
+      <div>
+        <div class="logo-text">KONTROL AC</div>
+        <div class="logo-sub">Sistem Monitoring Industri</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-wifi">
+        <div class="dot" id="wifiDot"></div>
+        <span id="wifiStatus">Menghubungkan...</span>
+      </div>
+      <div class="last-update" id="lastUpdate">--</div>
+    </div>
+  </header>
+  <div class="error-banner" id="errorBanner"></div>
+  <div class="section-title">Status Ruangan</div>
+  <div class="slave-grid" id="slaveGrid">
+    <div class="slave-card"><div class="slave-header"><div class="slave-name">Memuat data...</div></div></div>
+  </div>
+  <div class="section-title">Ringkasan Daya</div>
+  <div class="cards-row cards-4">
+    <div class="card orange"><div class="card-label">Total Daya</div><div class="card-value" id="totalPower">--<span class="card-unit">W</span></div></div>
+    <div class="card green"><div class="card-label">CH1 Tegangan</div><div class="card-value" id="v1">--<span class="card-unit">V</span></div></div>
+    <div class="card green"><div class="card-label">CH2 Tegangan</div><div class="card-value" id="v2">--<span class="card-unit">V</span></div></div>
+    <div class="card green"><div class="card-label">CH3 Tegangan</div><div class="card-value" id="v3">--<span class="card-unit">V</span></div></div>
+  </div>
+  <div class="pzem-table-wrap">
+    <div class="pzem-table-title">Detail PZEM — 3 Channel</div>
+    <table>
+      <thead><tr><th>Channel</th><th>Tegangan (V)</th><th>Arus (A)</th><th>Daya (W)</th><th>Power Factor</th><th>Energi (kWh)</th></tr></thead>
+      <tbody id="pzemTable"><tr><td colspan="6" style="color:var(--text-dim);text-align:center">Memuat data...</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section-title">Grafik Historis</div>
+  <div class="chart-filter">
+    <button class="filter-btn active" onclick="changeFilter('1d',this)">1 Hari</button>
+    <button class="filter-btn" onclick="changeFilter('1w',this)">1 Minggu</button>
+    <button class="filter-btn" onclick="changeFilter('1m',this)">1 Bulan</button>
+  </div>
+  <div class="charts-grid">
+    <div class="chart-card"><div class="chart-title">Suhu Ruangan (°C)</div><div class="chart-wrap"><canvas id="chartTemp"></canvas></div></div>
+    <div class="chart-card"><div class="chart-title">Daya Total (W)</div><div class="chart-wrap"><canvas id="chartPower"></canvas></div></div>
+    <div class="chart-card"><div class="chart-title">Jumlah Orang</div><div class="chart-wrap"><canvas id="chartPersons"></canvas></div></div>
+    <div class="chart-card"><div class="chart-title">Kelembaban (%)</div><div class="chart-wrap"><canvas id="chartHum"></canvas></div></div>
+  </div>
+</div>
+<script>
+const FIREBASE_HOST="https://ac-monitor-industri-default-rtdb.asia-southeast1.firebasedatabase.app";
+const FIREBASE_AUTH="DcOLsJQyQptHH7fTBvQGHQ1ClZpU1Oh9CKWgrttM";
+let currentFilter='1d',charts={};
+async function fbGet(path){
+  const r=await fetch(`${FIREBASE_HOST}${path}.json?auth=${FIREBASE_AUTH}`);
+  if(!r.ok)throw new Error(`Firebase ${r.status}`);
+  return r.json();
+}
+const chartDefaults={
+  responsive:true,maintainAspectRatio:false,animation:{duration:400},
+  plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a2234',borderColor:'#1e3a5f',borderWidth:1,titleFont:{family:'Share Tech Mono',size:11},bodyFont:{family:'Share Tech Mono',size:12},titleColor:'#4a6080',bodyColor:'#c8d8e8'}},
+  scales:{x:{grid:{color:'rgba(30,58,95,0.4)'},ticks:{color:'#4a6080',font:{family:'Share Tech Mono',size:10},maxTicksLimit:8}},y:{grid:{color:'rgba(30,58,95,0.4)'},ticks:{color:'#4a6080',font:{family:'Share Tech Mono',size:10}}}}
+};
+function makeChart(id,color){
+  return new Chart(document.getElementById(id).getContext('2d'),{
+    type:'line',
+    data:{labels:[],datasets:[{data:[],borderColor:color,backgroundColor:color+'15',borderWidth:2,pointRadius:2,pointHoverRadius:5,fill:true,tension:0.4}]},
+    options:{...chartDefaults}
+  });
+}
+function initCharts(){
+  charts.temp=makeChart('chartTemp','#ff6b35');
+  charts.power=makeChart('chartPower','#00c8ff');
+  charts.persons=makeChart('chartPersons','#00ff9d');
+  charts.hum=makeChart('chartHum','#ffb700');
+}
+function updateChart(chart,labels,data){chart.data.labels=labels;chart.data.datasets[0].data=data;chart.update();}
+function renderSlaves(data){
+  const grid=document.getElementById('slaveGrid');
+  const slaves=Object.entries(data).filter(([k])=>k.startsWith('Slave'));
+  if(!slaves.length){grid.innerHTML='<div class="slave-card"><div class="slave-header"><div class="slave-name">Belum ada slave</div></div></div>';return;}
+  grid.innerHTML=slaves.map(([name,s])=>`
+    <div class="slave-card">
+      <div class="slave-header">
+        <div class="slave-name">${name.toUpperCase()}</div>
+        <div class="badge ${s.online?'online':'offline'}">${s.online?'ONLINE':'OFFLINE'}</div>
+      </div>
+      <div class="slave-metrics">
+        <div class="metric"><div class="metric-val ${s.temp>28?'hot':'cool'}">${s.temp?.toFixed(1)??'--'}</div><div class="metric-lbl">Suhu °C</div></div>
+        <div class="metric"><div class="metric-val">${s.hum?.toFixed(1)??'--'}</div><div class="metric-lbl">Lembab %</div></div>
+        <div class="metric"><div class="metric-val green">${s.n??'--'}</div><div class="metric-lbl">Orang</div></div>
+        <div class="metric"><div class="metric-val cool">${s.tset??'--'}</div><div class="metric-lbl">Tset °C</div></div>
+        <div class="metric"><div class="metric-val">${s.cards??'--'}</div><div class="metric-lbl">Kartu</div></div>
+      </div>
+    </div>`).join('');
+}
+function renderPzem(data){
+  let total=0;
+  [1,2,3].forEach(i=>{const p=data['pzem'+i];if(p)total+=(p.p||0);});
+  document.getElementById('totalPower').innerHTML=total.toFixed(1)+'<span class="card-unit">W</span>';
+  for(let i=1;i<=3;i++){const p=data['pzem'+i];if(p)document.getElementById('v'+i).innerHTML=(p.v||0).toFixed(1)+'<span class="card-unit">V</span>';}
+  document.getElementById('pzemTable').innerHTML=[1,2,3].map(i=>{
+    const p=data['pzem'+i]||{};
+    return`<tr><td class="td-channel">CH${i}</td><td class="td-v">${(p.v||0).toFixed(1)}</td><td class="td-i">${(p.i||0).toFixed(2)}</td><td class="td-p">${(p.p||0).toFixed(1)}</td><td class="td-pf">${(p.pf||0).toFixed(2)}</td><td class="td-e">${(p.e||0).toFixed(3)}</td></tr>`;
+  }).join('');
+}
+function getDateRange(filter){
+  const now=new Date(),dates=[],days=filter==='1d'?1:filter==='1w'?7:30;
+  for(let d=days-1;d>=0;d--){const dt=new Date(now);dt.setDate(dt.getDate()-d);dates.push(dt.toISOString().split('T')[0]);}
+  return dates;
+}
+async function loadHistory(filter){
+  const dates=getDateRange(filter);
+  const labels=[],tempD=[],powerD=[],personsD=[],humD=[];
+  for(const date of dates){
+    try{
+      const day=await fbGet(`/history/${date}`);
+      if(!day)continue;
+      const times=Object.keys(day).sort();
+      for(const time of times){
+        const e=day[time];
+        labels.push(filter==='1d'?time:date.slice(5)+' '+time);
+        const sk=Object.keys(e).find(k=>k.startsWith('Slave'));
+        tempD.push(sk?e[sk].temp:null);
+        personsD.push(sk?e[sk].n:null);
+        humD.push(sk?e[sk].hum:null);
+        let tp=0;['pzem1','pzem2','pzem3'].forEach(k=>{if(e[k])tp+=e[k].p||0;});
+        powerD.push(tp);
+      }
+    }catch(e){/*skip*/}
+  }
+  const max=100,step=Math.max(1,Math.floor(labels.length/max));
+  const f=arr=>arr.filter((_,i)=>i%step===0);
+  updateChart(charts.temp,f(labels),f(tempD));
+  updateChart(charts.power,f(labels),f(powerD));
+  updateChart(charts.persons,f(labels),f(personsD));
+  updateChart(charts.hum,f(labels),f(humD));
+}
+async function fetchRealtime(){
+  try{
+    const data=await fbGet('/realtime');
+    if(!data)return;
+    renderSlaves(data);renderPzem(data);
+    document.getElementById('lastUpdate').textContent='Update: '+new Date().toLocaleTimeString('id-ID');
+    document.getElementById('wifiDot').className='dot';
+    document.getElementById('wifiStatus').textContent='Terhubung';
+    document.getElementById('errorBanner').classList.remove('show');
+  }catch(e){
+    document.getElementById('wifiDot').className='dot offline';
+    document.getElementById('wifiStatus').textContent='Terputus';
+    document.getElementById('errorBanner').textContent='Gagal: '+e.message;
+    document.getElementById('errorBanner').classList.add('show');
+  }
+}
+async function changeFilter(f,btn){
+  currentFilter=f;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  await loadHistory(f);
+}
+async function init(){
+  initCharts();
+  await fetchRealtime();
+  await loadHistory('1d');
+  setTimeout(()=>document.getElementById('loadingOverlay').classList.add('hidden'),1600);
+  setInterval(fetchRealtime,15000);
+}
+init();
+</script>
+</body>
+</html>
