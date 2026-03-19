@@ -356,6 +356,25 @@ async function fetchRealtime() {
   try {
     const data = await fbGet('/realtime');
     if (!data) return;
+
+    // Deteksi master offline: _masterTs adalah unix timestamp dari RTC
+    // Jika selisih antara waktu sekarang dan _masterTs > 30 detik, master offline
+    const masterTs = data._masterTs || 0;
+    const nowSec = Math.floor(Date.now() / 1000);
+    // masterTs adalah unix time dari RTC — bandingkan langsung dengan waktu browser
+    // Toleransi 60 detik (update Firebase tiap 15 detik, +buffer)
+    const masterOffline = masterTs > 0 && (nowSec - masterTs) > 60;
+
+    if (masterOffline) {
+      // Master tidak update >30 detik — tandai semua slave offline
+      const grid = document.getElementById('slaveGrid');
+      const cards = grid.querySelectorAll('.badge');
+      cards.forEach(b => { b.className = 'badge offline'; b.textContent = 'OFFLINE'; });
+      document.getElementById('wifiDot').className = 'dot offline';
+      document.getElementById('wifiStatus').textContent = 'Master Offline';
+      return;
+    }
+
     renderSlaves(data);
     renderPzem(data);
     document.getElementById('lastUpdate').textContent = 'Update: ' + new Date().toLocaleTimeString('id-ID');
