@@ -1,6 +1,13 @@
 /**
  * ============================================================
- *  Industrial AC Automation System — MASTER v4.3
+ *  Industrial AC Automation System — MASTER v5.0
+ *
+ *  Perubahan v5.0:
+ *    - Hapus fast-path hardcode MAC → pairing wajib setelah factory reset
+ *    - Mode Auto/Manual via Firebase: polling /control tiap 3 detik
+ *    - Command baru: AC ON/OFF, TEMP UP/DOWN, SET MODE
+ *    - SlavePayload tambah acState
+ *    - Realtime Firebase tambah field mode dan acState
  *
  *  Perubahan v4.3:
  *    - Navigasi idle: UP/DOWN scroll manual, OK masuk menu
@@ -73,6 +80,7 @@
 #define SLAVE_TIMEOUT_MS    60000   // slave dianggap offline jika >60 detik tidak ada data
 #define SLAVE_PING_MS       5000    // ping slave tiap 5 detik
 #define HISTORY_MAX_DAYS    30      // hapus historis > 30 hari
+#define CONTROL_POLL_MS     3000    // polling Firebase /control tiap 3 detik
 
 #define FIREBASE_HOST   "https://ac-monitor-industri-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define FIREBASE_AUTH   "DcOLsJQyQptHH7fTBvQGHQ1ClZpU1Oh9CKWgrttM"
@@ -104,6 +112,7 @@ typedef struct {
     float   setTemp;
     uint8_t cardCount;
     uint8_t enrollStatus; // ENROLL_IDLE/SUCCESS/DUPLICATE/FULL
+    uint8_t acState;      // 0=off, 1=on
 } SlavePayload;
 
 #define CMD_SEND_IR         0x01
@@ -111,6 +120,11 @@ typedef struct {
 #define CMD_DELETE_CARDS    0x03
 #define CMD_PING            0x04
 #define CMD_DELETE_ONE_CARD 0x05
+#define CMD_AC_ON           0x06
+#define CMD_AC_OFF          0x07
+#define CMD_TEMP_UP_CMD     0x08
+#define CMD_TEMP_DOWN_CMD   0x09
+#define CMD_SET_MODE        0x0A
 
 typedef struct {
     bool     active;
@@ -234,6 +248,11 @@ unsigned long       btnLastTime[3]  = {0, 0, 0};
 
 // SD status tracking
 bool                sdWasReady     = false;
+
+// Mode Auto/Manual (synced via Firebase)
+String              currentMode      = "auto";  // "auto" atau "manual"
+unsigned long       lastControlPoll  = 0;
+unsigned long       lastCmdTs        = 0;       // timestamp terakhir command yang dieksekusi
 
 // FreeRTOS
 QueueHandle_t       sdQueue;
@@ -780,6 +799,28 @@ void firebaseDelete(WiFiClientSecure &client, HTTPClient &http, const String &pa
     }
 }
 
+String firebaseGet(WiFiClientSecure &client, HTTPClient &http, const String &path) {
+    String url = String(FIREBASE_HOST) + path + ".json?auth=" + FIREBASE_AUTH;
+    String result = "";
+    if (http.begin(client, url)) {
+        int code = http.GET();
+        if (code == 200) {
+            result = http.getString();
+        }
+        http.end();
+    }
+    return result;
+}
+
+void firebasePatch(WiFiClientSecure &client, HTTPClient &http, const String &path, const String &json) {
+    String url = String(FIREBASE_HOST) + path + ".json?auth=" + FIREBASE_AUTH;
+    if (http.begin(client, url)) {
+        http.addHeader("Content-Type", "application/json");
+        http.sendRequest("PATCH", json);
+        http.end();
+    }
+}
+
 // ============================================================
 //  SD SYNC dari Firebase (saat SD dipasang kembali)
 // ============================================================
@@ -932,8 +973,11 @@ void taskBackground(void* param) {
                 json += "\"tset\":" + String((int)round(slaveData[s].setTemp)) + ",";
                 json += "\"cards\":" + String(slaveData[s].cardCount) + ",";
                 json += "\"online\":" + String(isSlaveOnline(s) ? "true" : "false") + ",";
+                json += "\"acState\":" + String(slaveData[s].acState) + ",";
                 json += "\"lastSeen\":" + String(millis()) + "},";
             }
+            // Tambah field mode
+            json += "\"mode\":\"" + currentMode + "\",";
             // Tambahkan timestamp master (unix time dari RTC) agar web bisa deteksi master offline
             if (rtcReady) {
                 DateTime now2 = rtc.now();
@@ -1019,6 +1063,93 @@ void taskBackground(void* param) {
             uint32_t fh = ESP.getFreeHeap();
             Serial.printf("[HEAP] Free: %d bytes\n", fh);
             if (fh < HEAP_WARN_BYTES) logToSDQueue("WARN,heap_low," + String(fh));
+        }
+
+        // ── Firebase Control Polling (tiap 3 detik) ────────────
+        if (millis() - lastControlPoll > CONTROL_POLL_MS
+            && WiFi.status() == WL_CONNECTED
+            && slaveCount > 0
+            && appState != STATE_SLAVE_PAIRING) {
+            lastControlPoll = millis();
+            WiFiClientSecure client2; client2.setInsecure(); client2.setTimeout(3);
+            HTTPClient http2; http2.setTimeout(3000);
+
+            String ctrlJson = firebaseGet(client2, http2, "/control");
+            if (ctrlJson.length() > 2 && ctrlJson != "null") {
+                // Parse mode
+                int modeIdx = ctrlJson.indexOf("\"mode\"");
+                if (modeIdx >= 0) {
+                    int modeValStart = ctrlJson.indexOf(':', modeIdx) + 1;
+                    // Find the value between quotes
+                    int q1 = ctrlJson.indexOf('"', modeValStart);
+                    int q2 = ctrlJson.indexOf('"', q1 + 1);
+                    if (q1 >= 0 && q2 > q1) {
+                        String newMode = ctrlJson.substring(q1 + 1, q2);
+                        if (newMode != currentMode) {
+                            currentMode = newMode;
+                            Serial.printf("[CTRL] Mode diubah ke: %s\n", currentMode.c_str());
+                            // Kirim CMD_SET_MODE ke semua slave
+                            for (int i = 0; i < slaveCount; i++) {
+                                MasterCommand cmd; memset(&cmd, 0, sizeof(cmd));
+                                cmd.cmd = CMD_SET_MODE;
+                                cmd.slaveIdx = (currentMode == "auto") ? 0 : 1;
+                                sendCommand(i, cmd);
+                            }
+                        }
+                    }
+                }
+
+                // Parse cmd
+                int cmdIdx = ctrlJson.indexOf("\"cmd\"");
+                if (cmdIdx >= 0) {
+                    int cmdValStart = ctrlJson.indexOf(':', cmdIdx) + 1;
+                    int cq1 = ctrlJson.indexOf('"', cmdValStart);
+                    int cq2 = ctrlJson.indexOf('"', cq1 + 1);
+                    if (cq1 >= 0 && cq2 > cq1) {
+                        String cmdStr = ctrlJson.substring(cq1 + 1, cq2);
+                        if (cmdStr != "none" && cmdStr.length() > 0) {
+                            // Parse cmdTs untuk cek apakah command baru
+                            int tsIdx = ctrlJson.indexOf("\"cmdTs\"");
+                            unsigned long cmdTs = 0;
+                            if (tsIdx >= 0) {
+                                int tsStart = ctrlJson.indexOf(':', tsIdx) + 1;
+                                // Skip whitespace
+                                while (tsStart < (int)ctrlJson.length() && ctrlJson[tsStart] == ' ') tsStart++;
+                                String tsStr = "";
+                                while (tsStart < (int)ctrlJson.length() && ctrlJson[tsStart] >= '0' && ctrlJson[tsStart] <= '9') {
+                                    tsStr += ctrlJson[tsStart++];
+                                }
+                                cmdTs = tsStr.toInt();
+                            }
+
+                            if (cmdTs != lastCmdTs) {
+                                lastCmdTs = cmdTs;
+                                Serial.printf("[CTRL] Perintah: %s\n", cmdStr.c_str());
+
+                                // Tentukan command ESP-NOW
+                                uint8_t espCmd = 0;
+                                if      (cmdStr == "ac_on")     espCmd = CMD_AC_ON;
+                                else if (cmdStr == "ac_off")    espCmd = CMD_AC_OFF;
+                                else if (cmdStr == "temp_up")   espCmd = CMD_TEMP_UP_CMD;
+                                else if (cmdStr == "temp_down") espCmd = CMD_TEMP_DOWN_CMD;
+
+                                if (espCmd != 0) {
+                                    for (int i = 0; i < slaveCount; i++) {
+                                        MasterCommand mcmd; memset(&mcmd, 0, sizeof(mcmd));
+                                        mcmd.cmd = espCmd; mcmd.slaveIdx = i;
+                                        sendCommand(i, mcmd);
+                                    }
+                                }
+
+                                // Clear command di Firebase
+                                WiFiClientSecure client3; client3.setInsecure(); client3.setTimeout(3);
+                                HTTPClient http3; http3.setTimeout(3000);
+                                firebasePatch(client3, http3, "/control", "{\"cmd\":\"none\"}");
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1129,8 +1260,11 @@ void setup() {
     }
     delay(200);
 
-    Serial.println("[MASTER v4.3] Siap.");
+    Serial.println("[MASTER v5.0] Siap.");
     Serial.printf("[SLAVES] %d slave tersimpan\n", slaveCount);
+
+    // Pairing wajib setelah factory reset.
+    // Tidak ada fast path inject — slave harus ditemukan via broadcast.
 
     // Kirim ping ke semua slave tersimpan saat boot
     // agar slave update channel ke channel WiFi aktif master

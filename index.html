@@ -52,6 +52,36 @@
     <div class="slave-card"><div class="slave-header"><div class="slave-name">Memuat data...</div></div></div>
   </div>
 
+  <!-- Kontrol AC — Mode & Manual -->
+  <div class="section-title">Kontrol AC</div>
+  <div class="control-panel" id="controlPanel">
+    <div class="control-header">
+      <div class="mode-switch">
+        <button class="mode-btn active" id="btnAuto" onclick="setMode('auto')">🤖 AUTO</button>
+        <button class="mode-btn" id="btnManual" onclick="setMode('manual')">🎛️ MANUAL</button>
+      </div>
+      <div class="mode-status" id="modeStatus">Mode: Auto — AC dikontrol otomatis berdasarkan sensor</div>
+    </div>
+    <div class="manual-controls" id="manualControls">
+      <button class="ctrl-btn ctrl-on" id="ctrlOn" onclick="sendCmd('ac_on')" disabled>
+        <span class="ctrl-icon">⚡</span>
+        <span class="ctrl-label">AC ON</span>
+      </button>
+      <button class="ctrl-btn ctrl-off" id="ctrlOff" onclick="sendCmd('ac_off')" disabled>
+        <span class="ctrl-icon">🔴</span>
+        <span class="ctrl-label">AC OFF</span>
+      </button>
+      <button class="ctrl-btn ctrl-temp" id="ctrlUp" onclick="sendCmd('temp_up')" disabled>
+        <span class="ctrl-icon">🔺</span>
+        <span class="ctrl-label">Suhu +</span>
+      </button>
+      <button class="ctrl-btn ctrl-temp" id="ctrlDown" onclick="sendCmd('temp_down')" disabled>
+        <span class="ctrl-icon">🔻</span>
+        <span class="ctrl-label">Suhu −</span>
+      </button>
+    </div>
+  </div>
+
   <!-- PZEM Summary -->
   <div class="section-title">Ringkasan Daya</div>
   <div class="cards-row cards-4">

@@ -1,6 +1,13 @@
 /**
  * ============================================================
- *  Industrial AC Automation System — SLAVE v1.2
+ *  Industrial AC Automation System — SLAVE v2.0
+ *
+ *  Perubahan v2.0:
+ *    - Hapus fast-path hardcode MAC → pairing wajib setelah factory reset
+ *    - Rule-based: AC OFF otomatis setelah 5 menit tanpa orang
+ *    - Mode Auto/Manual: saat manual, logika otomatis dinonaktifkan
+ *    - Command baru: CMD_AC_ON/OFF, CMD_TEMP_UP/DOWN, CMD_SET_MODE
+ *    - SlavePayload tambah acState agar master/web tahu status AC
  *
  *  Perubahan v1.2:
  *    - SlavePayload tambah enrollStatus untuk feedback ke master
@@ -57,6 +64,7 @@
 #define REPORT_MS           2000
 #define PROX_DEBOUNCE_MS    2000
 #define MASTER_TIMEOUT_MS   60000  // kirim ulang laporan jika master lama tidak ping
+#define EMPTY_ROOM_OFF_MS   300000 // 5 menit tanpa orang → AC OFF
 
 #define T_TARGET    24.0f
 #define K_FACTOR    1.0f   // 1 derajat per orang (bulat)
@@ -91,6 +99,7 @@ typedef struct {
     float    setTemp;
     uint8_t  cardCount;
     uint8_t  enrollStatus;
+    uint8_t  acState;       // 0=off, 1=on
 } SlavePayload;
 
 #define CMD_SEND_IR         0x01
@@ -98,6 +107,11 @@ typedef struct {
 #define CMD_DELETE_CARDS    0x03
 #define CMD_PING            0x04
 #define CMD_DELETE_ONE_CARD 0x05
+#define CMD_AC_ON           0x06
+#define CMD_AC_OFF          0x07
+#define CMD_TEMP_UP_CMD     0x08
+#define CMD_TEMP_DOWN_CMD   0x09
+#define CMD_SET_MODE        0x0A
 
 #define IR_TYPE_ON          0
 #define IR_TYPE_OFF         1
@@ -129,6 +143,12 @@ float    currentHum   = 0;
 float    setTemp      = T_TARGET;
 uint8_t  enrollStatus = ENROLL_IDLE;
 
+// AC state tracking
+bool          acIsOn           = false;  // status AC saat ini
+bool          roomEmpty        = false;  // ruangan kosong, timer berjalan
+unsigned long emptyRoomStart   = 0;      // waktu mulai ruangan kosong
+bool          autoMode         = true;   // true=auto, false=manual
+
 unsigned long lastProxTrigger  = 0;
 bool          lastProxState    = HIGH;
 unsigned long lastDhtRead      = 0;
@@ -138,6 +158,9 @@ bool          reportNow        = false;
 bool          irAllReady       = false;  // semua IR diterima, AC ON dari loop
 bool          enrollFeedback   = false;  // feedback enroll dari loop
 bool          deleteFeedback   = false;  // feedback delete dari loop
+
+// Manual command flags (set dari callback, eksekusi di loop)
+volatile uint8_t manualCmdPending = 0;  // 0=none, CMD_AC_ON/OFF/TEMP_UP/DOWN
 
 // Enroll & delete one
 bool          enrollMode       = false;
@@ -365,10 +388,12 @@ void reportToMaster() {
     payload.setTemp      = setTemp;
     payload.cardCount    = cardCount;
     payload.enrollStatus = enrollStatus;
+    payload.acState      = acIsOn ? 1 : 0;
 
     esp_err_t result = esp_now_send(masterMac, (uint8_t*)&payload, sizeof(SlavePayload));
-    Serial.printf("[REPORT] CH%d T:%.1f H:%.1f N:%d result:%d\n",
-        masterCh, payload.temp, payload.hum, payload.personCount, result);
+    Serial.printf("[REPORT] CH%d T:%.1f H:%.1f N:%d AC:%s result:%d\n",
+        masterCh, payload.temp, payload.hum, payload.personCount,
+        acIsOn ? "ON" : "OFF", result);
 }
 
 void onDataRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
@@ -482,6 +507,36 @@ void onDataRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
                 Serial.println("[DELETE_ONE] Mode hapus 1 kartu aktif");
                 feedbackDeleteMode();
                 break;
+
+            case CMD_AC_ON:
+                manualCmdPending = CMD_AC_ON;
+                Serial.println("[CMD] AC ON dari master (manual)");
+                break;
+
+            case CMD_AC_OFF:
+                manualCmdPending = CMD_AC_OFF;
+                Serial.println("[CMD] AC OFF dari master (manual)");
+                break;
+
+            case CMD_TEMP_UP_CMD:
+                manualCmdPending = CMD_TEMP_UP_CMD;
+                Serial.println("[CMD] TEMP UP dari master (manual)");
+                break;
+
+            case CMD_TEMP_DOWN_CMD:
+                manualCmdPending = CMD_TEMP_DOWN_CMD;
+                Serial.println("[CMD] TEMP DOWN dari master (manual)");
+                break;
+
+            case CMD_SET_MODE:
+                autoMode = (cmd.slaveIdx == 0);  // 0=auto, 1=manual
+                Serial.printf("[CMD] Mode diubah ke: %s\n", autoMode ? "AUTO" : "MANUAL");
+                if (autoMode) {
+                    // Kembali ke auto, reset state
+                    roomEmpty = false;
+                }
+                reportNow = true;
+                break;
         }
     }
 }
@@ -492,7 +547,7 @@ void onDataRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("\n[SLAVE v1.2] Boot");
+    Serial.println("\n[SLAVE v2.0] Boot");
     btStop();
 
     pinMode(PIN_LED_GREEN, OUTPUT);
@@ -530,6 +585,11 @@ void setup() {
         if (masterCh == 0) masterCh = 1;
     }
     prefs.end();
+
+    // Jika NVS kosong (factory reset), slave wajib scan channel
+    // dan menunggu broadcast pairing dari master.
+    // Setelah pairing pertama berhasil, data disimpan ke NVS
+    // sehingga reconnect berikutnya cepat.
 
     WiFi.mode(WIFI_STA);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
@@ -623,6 +683,7 @@ void loop() {
         irAllReady = false;
         feedbackOK();
         sendACOn();
+        acIsOn = true;
         Serial.println("[IR] Semua IR siap, AC dinyalakan");
     }
     if (enrollFeedback) {
@@ -668,6 +729,40 @@ void loop() {
         reportNow = true;
     }
 
+    // ── Handle manual command dari master ─────────────────────
+    if (manualCmdPending != 0) {
+        uint8_t cmd = manualCmdPending;
+        manualCmdPending = 0;
+        switch (cmd) {
+            case CMD_AC_ON:
+                sendACOn();
+                acIsOn = true;
+                roomEmpty = false;
+                Serial.println("[MANUAL] AC ON");
+                buzzerBeep(1, 100);
+                break;
+            case CMD_AC_OFF:
+                sendACOff();
+                acIsOn = false;
+                Serial.println("[MANUAL] AC OFF");
+                buzzerBeep(2, 100);
+                break;
+            case CMD_TEMP_UP_CMD:
+                sendTempUp();
+                setTemp = min(setTemp + 1.0f, T_MAX);
+                Serial.printf("[MANUAL] TEMP UP → %.0f\n", setTemp);
+                buzzerBeep(1, 50);
+                break;
+            case CMD_TEMP_DOWN_CMD:
+                sendTempDown();
+                setTemp = max(setTemp - 1.0f, T_MIN);
+                Serial.printf("[MANUAL] TEMP DOWN → %.0f\n", setTemp);
+                buzzerBeep(1, 50);
+                break;
+        }
+        reportNow = true;
+    }
+
     // ── Baca DHT berkala ──────────────────────────────────────
     if (now - lastDhtRead > DHT_READ_MS) {
         lastDhtRead = now;
@@ -679,9 +774,20 @@ void loop() {
         Serial.printf("[DHT] T:%.1fC H:%.1f%%\n", currentTemp, currentHum);
     }
 
-    // ── Proximity sensor ──────────────────────────────────────
+    // ── Timer 5 menit: AC OFF jika ruangan kosong (hanya mode auto) ──
+    if (autoMode && roomEmpty && acIsOn
+        && (now - emptyRoomStart > EMPTY_ROOM_OFF_MS)) {
+        Serial.println("[RULE] 5 menit tanpa orang, AC OFF!");
+        sendACOff();
+        acIsOn = false;
+        setTemp = T_TARGET;
+        roomEmpty = false;
+        reportNow = true;
+    }
+
+    // ── Proximity sensor (hanya mode auto) ────────────────────
     bool proxNow = digitalRead(PIN_PROXIMITY);
-    if (proxNow == LOW && lastProxState == HIGH) {
+    if (autoMode && proxNow == LOW && lastProxState == HIGH) {
         if (now - lastProxTrigger > PROX_DEBOUNCE_MS) {
             lastProxTrigger = now;
             if (personCount > 0) {
@@ -689,9 +795,17 @@ void loop() {
                 removeFirstCardInside(); // hapus kartu pertama yang masuk (FIFO)
                 Serial.printf("[PROX] Orang keluar, total: %d\n", personCount);
                 feedbackExit();
-                float newTemp = calculateSetTemp(personCount);
-                if (personCount == 0) { sendACOff(); setTemp = T_TARGET; }
-                else { adjustACTemp(setTemp, newTemp); setTemp = newTemp; }
+                if (personCount == 0) {
+                    // Jangan langsung matikan AC, mulai timer 5 menit
+                    roomEmpty = true;
+                    emptyRoomStart = millis();
+                    setTemp = T_TARGET;
+                    Serial.println("[RULE] Ruangan kosong, timer 5 menit dimulai");
+                } else {
+                    float newTemp = calculateSetTemp(personCount);
+                    adjustACTemp(setTemp, newTemp);
+                    setTemp = newTemp;
+                }
                 reportNow = true; // kirim segera setelah event
             }
         }
@@ -724,8 +838,8 @@ void loop() {
             deleteOneMode = false;
             slaveState    = SLAVE_IDLE;
             reportNow     = true;
-        } else {
-            // Mode normal: cek akses
+        } else if (autoMode) {
+            // Mode auto: cek akses dan kontrol AC
             if (cardExists(uid)) {
                 if (cardInsideExists(uid)) {
                     Serial.println("[RFID] Kartu sudah di dalam, diabaikan");
@@ -735,8 +849,16 @@ void loop() {
                     addCardInside(uid);
                     Serial.printf("[RFID] Akses diterima, orang: %d\n", personCount);
                     feedbackEnter();
+
+                    // Cancel timer empty room jika ada
+                    roomEmpty = false;
+
                     float newTemp = calculateSetTemp(personCount);
-                    if (personCount == 1) { sendACOn(); delay(3000); }
+                    if (!acIsOn) {
+                        sendACOn();
+                        acIsOn = true;
+                        delay(3000);
+                    }
                     adjustACTemp(setTemp, newTemp);
                     setTemp = newTemp;
                     reportNow = true;
@@ -744,6 +866,15 @@ void loop() {
             } else {
                 Serial.println("[RFID] Kartu tidak dikenal");
                 feedbackError();
+            }
+        } else {
+            // Mode manual: RFID hanya feedback, tidak kontrol AC
+            if (cardExists(uid)) {
+                feedbackEnter();
+                Serial.println("[RFID] Manual mode: kartu dikenali tapi AC tidak dikontrol");
+            } else {
+                feedbackError();
+                Serial.println("[RFID] Kartu tidak dikenal");
             }
         }
     }

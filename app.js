@@ -17,6 +17,28 @@ async function fbGet(path) {
   return r.json();
 }
 
+async function fbPut(path, data) {
+  const r = await fetch(`${FIREBASE_HOST}${path}.json?auth=${FIREBASE_AUTH}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  if (!r.ok) throw new Error(`Firebase PUT error ${r.status}`);
+  return r.json();
+}
+
+async function fbPatch(path, data) {
+  const r = await fetch(`${FIREBASE_HOST}${path}.json?auth=${FIREBASE_AUTH}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  if (!r.ok) throw new Error(`Firebase PATCH error ${r.status}`);
+  return r.json();
+}
+
+let currentMode = 'auto';
+
 // ── CLOCK ────────────────────────────────────────────────────
 function updateClock() {
   const now = new Date();
@@ -147,7 +169,10 @@ function renderSlaves(data) {
     <div class="slave-card">
       <div class="slave-header">
         <div class="slave-name">${name.toUpperCase()}</div>
-        <div class="badge ${s.online ? 'online' : 'offline'}">${s.online ? 'ONLINE' : 'OFFLINE'}</div>
+        <div class="badge-group">
+          <div class="badge ${s.online ? 'online' : 'offline'}">${s.online ? 'ONLINE' : 'OFFLINE'}</div>
+          <div class="badge ${s.acState ? 'ac-on' : 'ac-off'}">${s.acState ? 'AC ON' : 'AC OFF'}</div>
+        </div>
       </div>
       <div class="slave-metrics">
         <div class="metric"><div class="metric-val ${(s.temp||0)>28?'hot':'cool'}">${(s.temp||0).toFixed(1)}</div><div class="metric-lbl">Suhu °C</div></div>
@@ -211,6 +236,13 @@ async function fetchRealtime() {
 
     renderSlaves(data);
     renderPzem(data);
+
+    // Sync mode dari Firebase realtime
+    if (data.mode) {
+      currentMode = data.mode;
+      updateControlUI();
+    }
+
     document.getElementById('lastUpdate').textContent = 'Update: ' + new Date().toLocaleTimeString('id-ID');
     document.getElementById('wifiDot').className = 'dot';
     document.getElementById('wifiStatus').textContent = 'Terhubung';
@@ -447,9 +479,88 @@ async function exportPDF() {
   doc.save(`kontrol-ac-${from}-${to}.pdf`);
 }
 
+// ── MODE & CONTROL ──────────────────────────────────────────
+function updateControlUI() {
+  const isManual = currentMode === 'manual';
+  const btnAuto = document.getElementById('btnAuto');
+  const btnManual = document.getElementById('btnManual');
+  const controls = document.getElementById('manualControls');
+  const status = document.getElementById('modeStatus');
+
+  if (btnAuto) btnAuto.classList.toggle('active', !isManual);
+  if (btnManual) btnManual.classList.toggle('active', isManual);
+
+  // Enable/disable manual controls
+  ['ctrlOn', 'ctrlOff', 'ctrlUp', 'ctrlDown'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !isManual;
+  });
+
+  if (controls) {
+    if (isManual) {
+      controls.classList.add('show');
+    } else {
+      controls.classList.remove('show');
+    }
+  }
+
+  if (status) {
+    if (isManual) {
+      status.textContent = 'Mode: Manual — AC dikontrol dari website';
+      status.style.color = 'var(--warning)';
+    } else {
+      status.textContent = 'Mode: Auto — AC dikontrol otomatis berdasarkan sensor';
+      status.style.color = 'var(--text-dim)';
+    }
+  }
+}
+
+async function setMode(mode) {
+  currentMode = mode;
+  updateControlUI();
+  try {
+    await fbPatch('/control', { mode: mode });
+    console.log(`[MODE] Set ke ${mode}`);
+  } catch(e) {
+    console.error('Gagal set mode:', e);
+    alert('Gagal mengubah mode. Coba lagi.');
+  }
+}
+
+async function sendCmd(cmd) {
+  if (currentMode !== 'manual') return;
+  // Disable tombol sementara
+  ['ctrlOn', 'ctrlOff', 'ctrlUp', 'ctrlDown'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  });
+  try {
+    await fbPatch('/control', { cmd: cmd, cmdTs: Date.now() });
+    console.log(`[CMD] Kirim: ${cmd}`);
+    // Feedback visual singkat
+    const btnMap = { ac_on: 'ctrlOn', ac_off: 'ctrlOff', temp_up: 'ctrlUp', temp_down: 'ctrlDown' };
+    const btn = document.getElementById(btnMap[cmd]);
+    if (btn) {
+      btn.classList.add('pulse');
+      setTimeout(() => btn.classList.remove('pulse'), 600);
+    }
+  } catch(e) {
+    console.error('Gagal kirim perintah:', e);
+    alert('Gagal mengirim perintah. Coba lagi.');
+  }
+  // Re-enable setelah jeda singkat
+  setTimeout(() => {
+    ['ctrlOn', 'ctrlOff', 'ctrlUp', 'ctrlDown'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = false;
+    });
+  }, 1000);
+}
+
 // ── INIT ─────────────────────────────────────────────────────
 async function init() {
   initCharts();
+  updateControlUI(); // Set initial UI state
 
   // Clock
   updateClock();
@@ -463,6 +574,15 @@ async function init() {
   document.getElementById('dateTo').value   = today;
   document.getElementById('exportFrom').value = weekAgoStr;
   document.getElementById('exportTo').value   = today;
+
+  // Load mode awal dari Firebase
+  try {
+    const ctrl = await fbGet('/control');
+    if (ctrl && ctrl.mode) {
+      currentMode = ctrl.mode;
+      updateControlUI();
+    }
+  } catch(e) { /* mode default auto */ }
 
   await fetchRealtime();
   await loadHistoryRange(today, today, true);
