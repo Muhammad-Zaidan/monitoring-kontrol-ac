@@ -71,14 +71,18 @@
         <span class="ctrl-icon">🔴</span>
         <span class="ctrl-label">AC OFF</span>
       </button>
-      <button class="ctrl-btn ctrl-temp" id="ctrlUp" onclick="sendCmd('temp_up')" disabled>
-        <span class="ctrl-icon">🔺</span>
-        <span class="ctrl-label">Suhu +</span>
-      </button>
-      <button class="ctrl-btn ctrl-temp" id="ctrlDown" onclick="sendCmd('temp_down')" disabled>
-        <span class="ctrl-icon">🔻</span>
-        <span class="ctrl-label">Suhu −</span>
-      </button>
+      <div class="temp-control-group">
+        <button class="ctrl-btn ctrl-temp" id="ctrlDown" onclick="sendCmd('temp_down')" disabled>
+          <span class="ctrl-icon">🔻</span>
+        </button>
+        <div class="manual-temp-display">
+          <span class="temp-val" id="manualTempVal">--</span>
+          <span class="temp-unit">°C</span>
+        </div>
+        <button class="ctrl-btn ctrl-temp" id="ctrlUp" onclick="sendCmd('temp_up')" disabled>
+          <span class="ctrl-icon">🔺</span>
+        </button>
+      </div>
     </div>
   </div>
 

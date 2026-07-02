@@ -65,7 +65,7 @@
 #define BTN_OK              34
 
 #define MAX_SLAVES          5
-#define IR_BUF_SIZE         100
+#define IR_BUF_SIZE         350
 #define DEBOUNCE_MS         50
 #define IDLE_SCROLL_MS      5000
 #define IDLE_REFRESH_MS     2000
@@ -96,14 +96,28 @@
 // ============================================================
 //  STRUCTS
 // ============================================================
+// SmallCommand: untuk perintah non-IR (PING, ENROLL, AC_ON/OFF, dll)
+// Ukuran sangat kecil, jauh di bawah batas 250 byte ESP-NOW
 typedef struct {
     uint8_t  cmd;
     uint8_t  slaveIdx;
-    uint32_t irData[IR_BUF_SIZE];
-    uint16_t irLen;
     uint8_t  irType;
     uint8_t  cardUid[4];
-} MasterCommand;
+} SmallCommand;
+
+// IRFragment: untuk mengirim data IR yang besar secara terpotong-potong
+// Setiap fragmen < 250 byte (batas ESP-NOW)
+#define FRAG_PAYLOAD  115  // max uint16_t per fragment (115*2 + 8 header = 238 byte < 250)
+#define CMD_IR_FRAG   0xF0 // penanda paket fragmen IR
+typedef struct {
+    uint8_t  cmd;          // selalu CMD_IR_FRAG
+    uint8_t  irType;       // IR_TYPE_ON/OFF/UP/DOWN
+    uint8_t  fragIndex;    // nomor fragmen (0,1,2...)
+    uint8_t  fragTotal;    // total fragmen yang akan dikirim
+    uint16_t totalLen;     // total panjang IR data (semua fragmen)
+    uint16_t offsetLen;    // jumlah elemen dalam fragmen ini
+    uint16_t data[FRAG_PAYLOAD]; // potongan data timing IR
+} IRFragment;
 
 typedef struct {
     float   temp;
@@ -130,10 +144,10 @@ typedef struct {
     bool     active;
     uint8_t  mac[6];
     char     label[16];
-    uint32_t irON[IR_BUF_SIZE];        uint16_t irON_len;
-    uint32_t irOFF[IR_BUF_SIZE];       uint16_t irOFF_len;
-    uint32_t irTEMP_UP[IR_BUF_SIZE];   uint16_t irTEMP_UP_len;
-    uint32_t irTEMP_DOWN[IR_BUF_SIZE]; uint16_t irTEMP_DOWN_len;
+    uint16_t irON[IR_BUF_SIZE];        uint16_t irON_len;
+    uint16_t irOFF[IR_BUF_SIZE];       uint16_t irOFF_len;
+    uint16_t irTEMP_UP[IR_BUF_SIZE];   uint16_t irTEMP_UP_len;
+    uint16_t irTEMP_DOWN[IR_BUF_SIZE]; uint16_t irTEMP_DOWN_len;
 } SlaveConfig;
 
 // ============================================================
@@ -229,7 +243,7 @@ unsigned long       deleteOneStart = 0;
 unsigned long       menuLastActivity = 0;
 
 // IR
-uint32_t            irBuf[IR_BUF_SIZE];
+uint16_t            irBuf[IR_BUF_SIZE];
 uint16_t            irBufLen    = 0;
 unsigned long       irWaitStart = 0;
 
@@ -266,7 +280,7 @@ PZEM004Tv30         pzem2(Serial2, PZEM_RX, PZEM_TX, 0x02);
 PZEM004Tv30         pzem3(Serial2, PZEM_RX, PZEM_TX, 0x03);
 RTC_DS3231          rtc;
 LiquidCrystal_I2C   lcd(0x27, 20, 4);
-IRrecv              irrecv(IR_RECEIVE_PIN);
+IRrecv              irrecv(IR_RECEIVE_PIN, 1024, 50, true);
 decode_results      irResults;
 bool                rtcReady = false;
 bool                sdReady  = false;
@@ -290,7 +304,7 @@ void saveFirstRunDone(); bool isFirstRun();
 void factoryReset();
 void sendAllIRToSlave(int idx);
 void sendIRDataToSlave(int idx, IrLearningStep step);
-void sendCommand(int idx, MasterCommand &cmd);
+void sendSmallCmd(int idx, SmallCommand &cmd);
 void registerAllPeers();
 void logToSDQueue(const String &data);
 void scrollIdleNext();
@@ -435,36 +449,55 @@ void factoryReset() {
 // ============================================================
 //  ESP-NOW
 // ============================================================
-void sendCommand(int idx, MasterCommand &cmd) {
+void sendSmallCmd(int idx, SmallCommand &cmd) {
     if (idx < 0 || idx >= slaveCount) return;
-    esp_now_send(slaves[idx].mac, (uint8_t*)&cmd, sizeof(MasterCommand));
+    esp_now_send(slaves[idx].mac, (uint8_t*)&cmd, sizeof(SmallCommand));
+}
+
+void sendIRFragmented(int idx, uint8_t irType, uint16_t* irData, uint16_t irLen) {
+    if (idx < 0 || idx >= slaveCount || irLen == 0) return;
+    int fragTotal = (irLen + FRAG_PAYLOAD - 1) / FRAG_PAYLOAD; // hitung jumlah fragmen
+    Serial.printf("[IR-FRAG] Kirim irType=%d len=%d dalam %d fragmen\n", irType, irLen, fragTotal);
+    
+    for (int f = 0; f < fragTotal; f++) {
+        IRFragment frag; memset(&frag, 0, sizeof(frag));
+        frag.cmd       = CMD_IR_FRAG;
+        frag.irType    = irType;
+        frag.fragIndex = f;
+        frag.fragTotal = fragTotal;
+        frag.totalLen  = irLen;
+        
+        int offset = f * FRAG_PAYLOAD;
+        int remaining = irLen - offset;
+        frag.offsetLen = (remaining > FRAG_PAYLOAD) ? FRAG_PAYLOAD : remaining;
+        memcpy(frag.data, &irData[offset], frag.offsetLen * sizeof(uint16_t));
+        
+        // Kirim hanya sebesar data yang terisi, bukan seluruh struct
+        size_t sendSize = 8 + frag.offsetLen * sizeof(uint16_t); // 8 byte header
+        esp_now_send(slaves[idx].mac, (uint8_t*)&frag, sendSize);
+        Serial.printf("  Frag %d/%d: offset=%d len=%d sendSize=%d\n", f+1, fragTotal, offset, frag.offsetLen, sendSize);
+        vTaskDelay(pdMS_TO_TICKS(80)); // jeda antar fragmen agar slave sempat memproses
+    }
 }
 
 void sendIRDataToSlave(int idx, IrLearningStep step) {
-    MasterCommand cmd; memset(&cmd, 0, sizeof(cmd));
-    cmd.cmd = CMD_SEND_IR; cmd.slaveIdx = idx; cmd.irType = (uint8_t)step;
+    uint16_t* data = nullptr;
+    uint16_t  len  = 0;
     switch (step) {
-        case IR_LEARN_ON:
-            memcpy(cmd.irData, slaves[idx].irON, slaves[idx].irON_len * 4);
-            cmd.irLen = slaves[idx].irON_len; break;
-        case IR_LEARN_OFF:
-            memcpy(cmd.irData, slaves[idx].irOFF, slaves[idx].irOFF_len * 4);
-            cmd.irLen = slaves[idx].irOFF_len; break;
-        case IR_LEARN_TEMP_UP:
-            memcpy(cmd.irData, slaves[idx].irTEMP_UP, slaves[idx].irTEMP_UP_len * 4);
-            cmd.irLen = slaves[idx].irTEMP_UP_len; break;
-        case IR_LEARN_TEMP_DOWN:
-            memcpy(cmd.irData, slaves[idx].irTEMP_DOWN, slaves[idx].irTEMP_DOWN_len * 4);
-            cmd.irLen = slaves[idx].irTEMP_DOWN_len; break;
+        case IR_LEARN_ON:        data = slaves[idx].irON;        len = slaves[idx].irON_len;        break;
+        case IR_LEARN_OFF:       data = slaves[idx].irOFF;       len = slaves[idx].irOFF_len;       break;
+        case IR_LEARN_TEMP_UP:   data = slaves[idx].irTEMP_UP;   len = slaves[idx].irTEMP_UP_len;   break;
+        case IR_LEARN_TEMP_DOWN: data = slaves[idx].irTEMP_DOWN; len = slaves[idx].irTEMP_DOWN_len; break;
         default: return;
     }
-    sendCommand(idx, cmd);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    sendIRFragmented(idx, (uint8_t)step, data, len);
 }
 
 void sendAllIRToSlave(int idx) {
-    for (int s = 0; s < (int)IR_LEARN_DONE; s++)
+    for (int s = 0; s < (int)IR_LEARN_DONE; s++) {
         sendIRDataToSlave(idx, (IrLearningStep)s);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 void registerAllPeers() {
@@ -549,27 +582,29 @@ bool isSlaveOnline(int idx) {
 bool captureIR() {
     if (!irrecv.decode(&irResults)) return false;
     irBufLen = 0;
-    if (irResults.rawlen > 1 && irResults.rawlen <= IR_BUF_SIZE + 1) {
+    // Tangkap semua timing data, sampai batas buffer
+    if (irResults.rawlen > 1) {
         for (uint16_t j = 1; j < irResults.rawlen && irBufLen < IR_BUF_SIZE; j++)
-            irBuf[irBufLen++] = (uint32_t)(irResults.rawbuf[j] * kRawTick);
+            irBuf[irBufLen++] = (uint16_t)(irResults.rawbuf[j] * kRawTick);
     }
     irrecv.resume();
+    Serial.printf("[IR] Captured rawlen=%d stored=%d\n", irResults.rawlen, irBufLen);
     return (irBufLen > 0);
 }
 
 void saveIRToSlave(int idx, IrLearningStep step) {
     switch (step) {
         case IR_LEARN_ON:
-            memcpy(slaves[idx].irON, irBuf, irBufLen * 4);
+            memcpy(slaves[idx].irON, irBuf, irBufLen * 2);
             slaves[idx].irON_len = irBufLen; break;
         case IR_LEARN_OFF:
-            memcpy(slaves[idx].irOFF, irBuf, irBufLen * 4);
+            memcpy(slaves[idx].irOFF, irBuf, irBufLen * 2);
             slaves[idx].irOFF_len = irBufLen; break;
         case IR_LEARN_TEMP_UP:
-            memcpy(slaves[idx].irTEMP_UP, irBuf, irBufLen * 4);
+            memcpy(slaves[idx].irTEMP_UP, irBuf, irBufLen * 2);
             slaves[idx].irTEMP_UP_len = irBufLen; break;
         case IR_LEARN_TEMP_DOWN:
-            memcpy(slaves[idx].irTEMP_DOWN, irBuf, irBufLen * 4);
+            memcpy(slaves[idx].irTEMP_DOWN, irBuf, irBufLen * 2);
             slaves[idx].irTEMP_DOWN_len = irBufLen; break;
         default: break;
     }
@@ -663,9 +698,9 @@ void refreshIdleDetailData() {
             slaveData[showIdx].temp, slaveData[showIdx].hum,
             slaveData[showIdx].personCount);
         lcdPrint(0, 1, buf);
-        snprintf(buf, sizeof(buf), "Tset:%.0fC  WiFi:%-3s",
+        snprintf(buf, sizeof(buf), "Tset:%.0fC M:%s",
             slaveData[showIdx].setTemp,
-            WiFi.status() == WL_CONNECTED ? "OK" : "--");
+            currentMode == "manual" ? "MANUAL" : "AUTO");
         lcdPrint(0, 2, buf);
         snprintf(buf, sizeof(buf), "Heap:%4dKB SD:%-3s",
             (int)(ESP.getFreeHeap() / 1024), sdReady ? "OK" : "ERR");
@@ -1051,9 +1086,9 @@ void taskBackground(void* param) {
             lastSlavePing = millis();
             for (int i = 0; i < slaveCount; i++) {
                 if (!slaves[i].active) continue;
-                MasterCommand cmd; memset(&cmd, 0, sizeof(cmd));
+                SmallCommand cmd; memset(&cmd, 0, sizeof(cmd));
                 cmd.cmd = CMD_PING; cmd.slaveIdx = i;
-                sendCommand(i, cmd);
+                sendSmallCmd(i, cmd);
             }
         }
 
@@ -1090,10 +1125,10 @@ void taskBackground(void* param) {
                             Serial.printf("[CTRL] Mode diubah ke: %s\n", currentMode.c_str());
                             // Kirim CMD_SET_MODE ke semua slave
                             for (int i = 0; i < slaveCount; i++) {
-                                MasterCommand cmd; memset(&cmd, 0, sizeof(cmd));
+                                SmallCommand cmd; memset(&cmd, 0, sizeof(cmd));
                                 cmd.cmd = CMD_SET_MODE;
                                 cmd.slaveIdx = (currentMode == "auto") ? 0 : 1;
-                                sendCommand(i, cmd);
+                                sendSmallCmd(i, cmd);
                             }
                         }
                     }
@@ -1135,9 +1170,9 @@ void taskBackground(void* param) {
 
                                 if (espCmd != 0) {
                                     for (int i = 0; i < slaveCount; i++) {
-                                        MasterCommand mcmd; memset(&mcmd, 0, sizeof(mcmd));
+                                        SmallCommand mcmd; memset(&mcmd, 0, sizeof(mcmd));
                                         mcmd.cmd = espCmd; mcmd.slaveIdx = i;
-                                        sendCommand(i, mcmd);
+                                        sendSmallCmd(i, mcmd);
                                     }
                                 }
 
@@ -1273,9 +1308,9 @@ void setup() {
         Serial.printf("[BOOT] Kirim ping ke %d slave di CH%d\n", slaveCount, wifiCh);
         delay(500);
         for (int i = 0; i < slaveCount; i++) {
-            MasterCommand cmd; memset(&cmd, 0, sizeof(cmd));
+            SmallCommand cmd; memset(&cmd, 0, sizeof(cmd));
             cmd.cmd = CMD_PING; cmd.slaveIdx = i;
-            sendCommand(i, cmd);
+            sendSmallCmd(i, cmd);
             delay(100);
         }
     }
@@ -1498,9 +1533,9 @@ void loop() {
                     showNotif("Slave offline!","Tidak bisa enroll.","","",2000,STATE_MENU);
                     break;
                 }
-                MasterCommand cmd; memset(&cmd,0,sizeof(cmd));
+                SmallCommand cmd; memset(&cmd,0,sizeof(cmd));
                 cmd.cmd=CMD_ENROLL_START; cmd.slaveIdx=menuEditTarget;
-                sendCommand(menuEditTarget,cmd);
+                sendSmallCmd(menuEditTarget,cmd);
                 enrollTarget  = menuEditTarget;
                 enrollStart   = millis();
                 appState      = STATE_MENU_ENROLL_WAIT;
@@ -1552,9 +1587,9 @@ void loop() {
             if (checkMenuTimeout()) break;
             if (btnPressed(0)){resetMenuActivity();appState=STATE_MENU_DELETE_CARDS_SELECT;renderSlaveSelectMenu(menuEditTarget);}
             if (btnPressed(2)){
-                MasterCommand cmd; memset(&cmd,0,sizeof(cmd));
+                SmallCommand cmd; memset(&cmd,0,sizeof(cmd));
                 cmd.cmd=CMD_DELETE_CARDS; cmd.slaveIdx=menuEditTarget;
-                sendCommand(menuEditTarget,cmd);
+                sendSmallCmd(menuEditTarget,cmd);
                 showNotif("Semua kartu dihapus.",slaves[menuEditTarget].label,"","",2000,STATE_MENU);
             }
             break;
@@ -1571,9 +1606,9 @@ void loop() {
                     showNotif("Slave offline!","Tidak bisa hapus.","","",2000,STATE_MENU);
                     break;
                 }
-                MasterCommand cmd; memset(&cmd,0,sizeof(cmd));
+                SmallCommand cmd; memset(&cmd,0,sizeof(cmd));
                 cmd.cmd=CMD_DELETE_ONE_CARD; cmd.slaveIdx=menuEditTarget;
-                sendCommand(menuEditTarget,cmd);
+                sendSmallCmd(menuEditTarget,cmd);
                 deleteOneStart=millis(); appState=STATE_MENU_DELETE_ONE_WAIT;
                 lcdClear();
                 lcdPrint(0,0,"Hapus 1 Kartu");

@@ -9,6 +9,8 @@ const SPARK_MAX = 20;
 const sparkData = { power:[], v1:[], v2:[], v3:[] };
 let refreshCountdown = 15;
 let refreshInterval = null;
+let currentMode = 'auto'; // default mode
+let manualTemp = 24; // local state for manual temp
 
 // ── FIREBASE ─────────────────────────────────────────────────
 async function fbGet(path) {
@@ -36,8 +38,6 @@ async function fbPatch(path, data) {
   if (!r.ok) throw new Error(`Firebase PATCH error ${r.status}`);
   return r.json();
 }
-
-let currentMode = 'auto';
 
 // ── CLOCK ────────────────────────────────────────────────────
 function updateClock() {
@@ -241,6 +241,17 @@ async function fetchRealtime() {
     if (data.mode) {
       currentMode = data.mode;
       updateControlUI();
+    }
+
+    // Sync manual temp dari slave pertama (sebagai acuan)
+    let firstSlaveKey = Object.keys(data).find(k => k !== 'pzem1' && k !== 'pzem2' && k !== 'pzem3' && !k.startsWith('_') && k !== 'mode');
+    if (firstSlaveKey && data[firstSlaveKey].tset) {
+      // Hanya update manualTemp jika tidak ada delay perubahan manual yang sedang berjalan
+      if (!window.manualTempAdjusting) {
+        manualTemp = data[firstSlaveKey].tset;
+        const tempEl = document.getElementById('manualTempVal');
+        if (tempEl) tempEl.textContent = manualTemp;
+      }
     }
 
     document.getElementById('lastUpdate').textContent = 'Update: ' + new Date().toLocaleTimeString('id-ID');
@@ -528,32 +539,57 @@ async function setMode(mode) {
 }
 
 async function sendCmd(cmd) {
-  if (currentMode !== 'manual') return;
+  if (currentMode !== 'manual') {
+    alert('Ubah ke mode MANUAL terlebih dahulu!');
+    return;
+  }
+  
+  // Local UI prediction for faster feedback
+  if (cmd === 'temp_up') {
+    manualTemp = Math.min(30, manualTemp + 1);
+    document.getElementById('manualTempVal').textContent = manualTemp;
+    window.manualTempAdjusting = true;
+    setTimeout(() => { window.manualTempAdjusting = false; }, 4000);
+  } else if (cmd === 'temp_down') {
+    manualTemp = Math.max(16, manualTemp - 1);
+    document.getElementById('manualTempVal').textContent = manualTemp;
+    window.manualTempAdjusting = true;
+    setTimeout(() => { window.manualTempAdjusting = false; }, 4000);
+  }
+
   // Disable tombol sementara
   ['ctrlOn', 'ctrlOff', 'ctrlUp', 'ctrlDown'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = true;
   });
+  
   try {
     await fbPatch('/control', { cmd: cmd, cmdTs: Date.now() });
     console.log(`[CMD] Kirim: ${cmd}`);
+    
     // Feedback visual singkat
     const btnMap = { ac_on: 'ctrlOn', ac_off: 'ctrlOff', temp_up: 'ctrlUp', temp_down: 'ctrlDown' };
-    const btn = document.getElementById(btnMap[cmd]);
-    if (btn) {
-      btn.classList.add('pulse');
-      setTimeout(() => btn.classList.remove('pulse'), 600);
+    const btnId = btnMap[cmd];
+    if (btnId) {
+      const btn = document.getElementById(btnId);
+      if (btn) {
+        btn.classList.add('pulse');
+        setTimeout(() => btn.classList.remove('pulse'), 600);
+      }
     }
   } catch(e) {
     console.error('Gagal kirim perintah:', e);
     alert('Gagal mengirim perintah. Coba lagi.');
   }
+  
   // Re-enable setelah jeda singkat
   setTimeout(() => {
-    ['ctrlOn', 'ctrlOff', 'ctrlUp', 'ctrlDown'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.disabled = false;
-    });
+    if (currentMode === 'manual') {
+      ['ctrlOn', 'ctrlOff', 'ctrlUp', 'ctrlDown'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = false;
+      });
+    }
   }, 1000);
 }
 

@@ -20,6 +20,7 @@
 #include <IRrecv.h>
 #include <IRremoteESP8266.h>
 #include <IRutils.h>
+#include <IRac.h>
 
 // ── PIN ──────────────────────────────────────────────────────
 #define PIN_IR   4
@@ -30,32 +31,31 @@
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // ── IR ───────────────────────────────────────────────────────
-IRrecv irrecv(PIN_IR);
+// Gunakan ukuran buffer besar (1024) dan timeout 50ms (standar 15ms).
+// Timeout 50ms sangat penting agar rentetan sinyal AC yang terputus 
+// (misal: Header lalu Data) digabung menjadi SATU sinyal utuh.
+IRrecv irrecv(PIN_IR, 1024, 50, true);
 decode_results irResult;
 
 #define IR_BUF 80
 
-// Simpan decoded value IR
-uint64_t irON_val=0,        irOFF_val=0;
-uint64_t irTEMP_UP_val=0,   irTEMP_DOWN_val=0;
-decode_type_t irON_type=UNKNOWN, irOFF_type=UNKNOWN;
-decode_type_t irTEMP_UP_type=UNKNOWN, irTEMP_DOWN_type=UNKNOWN;
-
 // ── STATE ────────────────────────────────────────────────────
-enum State       { STATE_LEARN, STATE_STANDBY, STATE_DETECTED };
-enum LearnStep   { LEARN_ON=0, LEARN_OFF, LEARN_TEMP_UP, LEARN_TEMP_DOWN, LEARN_DONE };
-State     appState   = STATE_LEARN;
-LearnStep learnStep  = LEARN_ON;
+enum State { STATE_STANDBY, STATE_DETECTED };
+State appState = STATE_STANDBY;
 
 String        detectedName = "";
+String        detectedLine2 = "";
 unsigned long detectedAt   = 0;
-#define DETECTED_SHOW_MS 2500
+#define DETECTED_SHOW_MS 3000
 
 uint8_t       animFrame = 0;
 unsigned long lastAnim  = 0;
 #define ANIM_MS 120
 
-const char* learnNames[] = { "AC ON", "AC OFF", "TEMP UP", "TEMP DOWN" };
+// Tracking status sebelumnya untuk mendeteksi perubahan
+bool    prevPowerKnown = false;
+bool    prevPower      = false;
+int     prevTemp       = -1;
 
 // ── OLED HELPERS ─────────────────────────────────────────────
 void drawCentered(const char* text, int y) {
@@ -64,40 +64,6 @@ void drawCentered(const char* text, int y) {
 }
 
 // ── SCREENS ──────────────────────────────────────────────────
-void drawLearnScreen() {
-    char stepStr[16];
-    snprintf(stepStr, sizeof(stepStr), "Langkah %d/4:", (int)learnStep + 1);
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 10, "REKAM SINYAL IR");
-    u8g2.drawHLine(0, 12, 128);
-    u8g2.drawStr(0, 26, stepStr);
-    u8g2.setFont(u8g2_font_10x20_tf);
-    drawCentered(learnNames[learnStep], 50);
-    u8g2.sendBuffer();
-}
-
-void drawLearnSuccess() {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 10, "REKAM SINYAL IR");
-    u8g2.drawHLine(0, 12, 128);
-    // Centang sederhana
-    u8g2.drawStr(40, 36, "OK!");
-    drawCentered("Tersimpan", 52);
-    u8g2.sendBuffer();
-    delay(700);
-}
-
-void drawLearnDone() {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tf);
-    drawCentered("Semua sinyal", 24);
-    drawCentered("berhasil direkam!", 36);
-    drawCentered("Masuk standby...", 52);
-    u8g2.sendBuffer();
-    delay(2000);
-}
 
 void drawStandbyScreen() {
     // Dots animasi
@@ -128,79 +94,112 @@ void drawStandbyScreen() {
 }
 
 void drawDetectedScreen() {
+    u8g2.clearBuffer();
+    
+    // Baris 1: Aksi (AC ON, TEMP UP, dll)
+    u8g2.setFont(u8g2_font_8x13B_tf);
+    drawCentered(detectedName.c_str(), 25);
+    
+    // Baris 2: Suhu
+    u8g2.setFont(u8g2_font_9x15_tf);
+    drawCentered(detectedLine2.c_str(), 50);
+
+    // Progress bar
     unsigned long elapsed = millis() - detectedAt;
     int barW = (int)map(elapsed, 0, DETECTED_SHOW_MS, 128, 0);
     barW = constrain(barW, 0, 128);
-
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 10, "TERDETEKSI:");
-    u8g2.drawHLine(0, 12, 128);
-
-    // Ikon
-    if (detectedName == "AC ON") {
-        u8g2.drawDisc(20, 38, 7);
-        // Sinar matahari — 8 titik arah
-        static const int8_t dx[] = { 0, 7, 10, 7,  0, -7,-10,-7};
-        static const int8_t dy[] = {-10,-7,  0, 7, 10,  7,  0,-7};
-        static const int8_t ex[] = { 0, 9, 13, 9,  0, -9,-13,-9};
-        static const int8_t ey[] = {-13,-9,  0, 9, 13,  9,  0,-9};
-        for (int i = 0; i < 8; i++)
-            u8g2.drawLine(20+dx[i], 38+dy[i], 20+ex[i], 38+ey[i]);
-    } else if (detectedName == "AC OFF") {
-        u8g2.drawCircle(20, 38, 9);
-        u8g2.drawLine(13, 31, 27, 45);
-        u8g2.drawLine(13, 45, 27, 31);
-    } else if (detectedName == "TEMP UP") {
-        u8g2.drawTriangle(20,26, 12,38, 28,38);
-        u8g2.drawBox(17, 38, 7, 10);
-    } else if (detectedName == "TEMP DOWN") {
-        u8g2.drawBox(17, 28, 7, 10);
-        u8g2.drawTriangle(20,52, 12,40, 28,40);
-    } else {
-        u8g2.setFont(u8g2_font_10x20_tf);
-        u8g2.drawStr(14, 48, "?");
-        u8g2.setFont(u8g2_font_6x10_tf);
-    }
-
-    // Nama sinyal
-    u8g2.setFont(u8g2_font_9x15_tf);
-    drawCentered(detectedName.c_str(), 52);
-    u8g2.setFont(u8g2_font_6x10_tf);
-
-    // Progress bar
     u8g2.drawBox(0, 62, barW, 2);
     u8g2.sendBuffer();
 }
 
-// ── IR CAPTURE & COMPARE ─────────────────────────────────────
-bool captureDecoded(uint64_t& val, decode_type_t& type) {
-    if (!irrecv.decode(&irResult)) return false;
+// ── IR FLUSH (MENGABAIKAN SISA SINYAL BERUNTUN DARI AC) ────────
+void flushIR() {
+    Serial.println("[DEBUG IR] Membersihkan sisa rentetan sinyal dari remote...");
+    unsigned long lastSignal = millis();
+    while (millis() - lastSignal < 600) {
+        if (irrecv.decode(&irResult)) {
+            lastSignal = millis();
+            irrecv.resume();
+        }
+        delay(10);
+    }
     irrecv.resume();
-    if (irResult.decode_type == UNKNOWN) return false;
-    val  = irResult.value;
-    type = irResult.decode_type;
-    return true;
+    Serial.println("[DEBUG IR] Saluran IR sudah bersih.");
 }
 
-String identifySignal(uint64_t val, decode_type_t type) {
-    Serial.printf("[ID] val=0x%llX type=%d | ON=0x%llX OFF=0x%llX UP=0x%llX DN=0x%llX\n",
-        val, (int)type, irON_val, irOFF_val, irTEMP_UP_val, irTEMP_DOWN_val);
-    if (val == irON_val)        return "AC ON";
-    if (val == irOFF_val)       return "AC OFF";
-    if (val == irTEMP_UP_val)   return "TEMP UP";
-    if (val == irTEMP_DOWN_val) return "TEMP DOWN";
-    return "Tdk Dikenal";
+// ── IR CAPTURE & DECODE ─────────────────────────────────────
+// Helper: parse sebuah field dari string hasil decode
+String parseField(const String& src, const String& key) {
+    int idx = src.indexOf(key);
+    if (idx == -1) return "";
+    int start = idx + key.length();
+    int end = src.indexOf(',', start);
+    if (end == -1) end = src.length();
+    return src.substring(start, end);
+}
+
+bool captureAndDecode(String& line1, String& line2) {
+    if (!irrecv.decode(&irResult)) return false;
+    
+    if (irResult.rawlen <= 10) {
+        irrecv.resume();
+        return false;
+    }
+    
+    Serial.printf("[DEBUG IR] Sinyal tertangkap! Type: %d, Bits: %d, RawLen: %d\n", 
+                  irResult.decode_type, irResult.bits, irResult.rawlen);
+                  
+    // Decode sinyal AC menjadi teks yang mudah dibaca
+    String fullDesc = IRAcUtils::resultAcToString(&irResult);
+    if (fullDesc.length() == 0) {
+        fullDesc = resultToHumanReadableBasic(&irResult);
+    }
+    Serial.println("====== HASIL DECODE ======");
+    Serial.println(fullDesc);
+    Serial.println("==========================");
+
+    if (hasACState(irResult.decode_type)) {
+        // Parse field-field dari hasil decode
+        String powerRaw = parseField(fullDesc, "Power: ");
+        String tempRaw  = parseField(fullDesc, "Temp: ");
+        String modeRaw  = parseField(fullDesc, "Mode: ");
+        String fanRaw   = parseField(fullDesc, "Fan: ");
+        
+        bool curPower = (powerRaw == "On");
+        
+        // Bersihkan Mode (misal: "3 (Cool)" -> "Cool")
+        int mIdx1 = modeRaw.indexOf('(');
+        int mIdx2 = modeRaw.indexOf(')');
+        if (mIdx1 != -1 && mIdx2 != -1) modeRaw = modeRaw.substring(mIdx1 + 1, mIdx2);
+        
+        // Bersihkan Fan (misal: "15 (Auto)" -> "Auto")
+        int fIdx1 = fanRaw.indexOf('(');
+        int fIdx2 = fanRaw.indexOf(')');
+        if (fIdx1 != -1 && fIdx2 != -1) fanRaw = fanRaw.substring(fIdx1 + 1, fIdx2);
+        
+        // Bangun teks untuk OLED (Logger Mode)
+        // Baris 1: P:ON  T:24C
+        line1 = String("PWR: ") + (curPower ? "ON " : "OFF") + "  " + tempRaw;
+        
+        // Baris 2: Cool | F:Auto
+        line2 = modeRaw + " | F:" + fanRaw;
+        
+    } else {
+        line1 = typeToString(irResult.decode_type);
+        line2 = "Val: " + String((unsigned long)irResult.value, HEX);
+    }
+    
+    return true;
 }
 
 // ── SETUP ────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    delay(1000); // tunggu Serial siap
+    delay(1000);
     Serial.println("[IR Catcher] Boot...");
 
     Wire.begin(OLED_SDA, OLED_SCL);
-    Wire.setClock(400000); // 400kHz agar tidak lambat
+    Wire.setClock(400000);
 
     u8g2.setBusClock(400000);
     u8g2.begin();
@@ -208,67 +207,41 @@ void setup() {
     Serial.println("[IR Catcher] OLED OK");
 
     irrecv.enableIRIn();
-    Serial.println("[IR Catcher] IR OK. Mulai rekam.");
+    Serial.println("[IR Catcher] IR OK. Siap mendengarkan.");
 
-    appState  = STATE_LEARN;
-    learnStep = LEARN_ON;
-    drawLearnScreen();
+    appState = STATE_STANDBY;
 }
 
 // ── LOOP ─────────────────────────────────────────────────────
 void loop() {
     unsigned long now = millis();
 
-    // Update frame animasi
     if (now - lastAnim >= ANIM_MS) {
         lastAnim = now;
         if (++animFrame > 255) animFrame = 0;
     }
 
-    // ── LEARN ────────────────────────────────────────────────
-    if (appState == STATE_LEARN) {
-        if (learnStep == LEARN_DONE) {
-            drawLearnDone();
-            appState = STATE_STANDBY;
-            Serial.println("[Standby] Menunggu sinyal...");
-            return;
-        }
-
-        uint64_t val; decode_type_t type;
-        if (captureDecoded(val, type)) {
-            switch (learnStep) {
-                case LEARN_ON:       irON_val       = val; irON_type       = type; Serial.printf("[LEARN] ON  val=0x%llX\n", val); break;
-                case LEARN_OFF:      irOFF_val      = val; irOFF_type      = type; Serial.printf("[LEARN] OFF val=0x%llX\n", val); break;
-                case LEARN_TEMP_UP:  irTEMP_UP_val  = val; irTEMP_UP_type  = type; Serial.printf("[LEARN] UP  val=0x%llX\n", val); break;
-                case LEARN_TEMP_DOWN:irTEMP_DOWN_val= val; irTEMP_DOWN_type= type; Serial.printf("[LEARN] DN  val=0x%llX\n", val); break;
-                default: break;
-            }
-            drawLearnSuccess();
-            learnStep = (LearnStep)((int)learnStep + 1);
-            if (learnStep < LEARN_DONE) drawLearnScreen();
-        }
-        return;
-    }
-
-    // ── DETECTED ─────────────────────────────────────────────
     if (appState == STATE_DETECTED) {
         drawDetectedScreen();
         if (now - detectedAt >= DETECTED_SHOW_MS) {
             appState = STATE_STANDBY;
+            Serial.println("\n[Standby] Menunggu sinyal...");
         }
         return;
     }
 
-    // ── STANDBY ──────────────────────────────────────────────
     if (appState == STATE_STANDBY) {
         drawStandbyScreen();
 
-        uint64_t val; decode_type_t type;
-        if (captureDecoded(val, type)) {
-            detectedName = identifySignal(val, type);
-            detectedAt   = now;
-            appState     = STATE_DETECTED;
-            Serial.printf("[DETECT] %s\n", detectedName.c_str());
+        String line1, line2;
+        if (captureAndDecode(line1, line2)) {
+            detectedName  = line1;
+            detectedLine2 = line2;
+            detectedAt    = now;
+            appState      = STATE_DETECTED;
+            Serial.printf("[OLED] %s | %s\n", line1.c_str(), line2.c_str());
+            
+            flushIR();
         }
         return;
     }

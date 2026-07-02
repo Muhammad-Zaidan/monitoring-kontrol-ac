@@ -58,7 +58,7 @@
 //  CONFIG
 // ============================================================
 #define MAX_CARDS           10
-#define IR_BUF_SIZE         100
+#define IR_BUF_SIZE         350
 #define ENROLL_TIMEOUT_MS   30000
 #define DHT_READ_MS         5000
 #define REPORT_MS           2000
@@ -83,14 +83,26 @@
 // ============================================================
 //  STRUCTS
 // ============================================================
+// SmallCommand: untuk perintah non-IR (PING, ENROLL, AC_ON/OFF, dll)
 typedef struct {
     uint8_t  cmd;
     uint8_t  slaveIdx;
-    uint32_t irData[IR_BUF_SIZE];
-    uint16_t irLen;
     uint8_t  irType;
     uint8_t  cardUid[4];
-} MasterCommand;
+} SmallCommand;
+
+// IRFragment: untuk menerima data IR yang besar secara terpotong-potong
+#define FRAG_PAYLOAD  115
+#define CMD_IR_FRAG   0xF0
+typedef struct {
+    uint8_t  cmd;
+    uint8_t  irType;
+    uint8_t  fragIndex;
+    uint8_t  fragTotal;
+    uint16_t totalLen;
+    uint16_t offsetLen;
+    uint16_t data[FRAG_PAYLOAD];
+} IRFragment;
 
 typedef struct {
     float    temp;
@@ -127,13 +139,20 @@ SlaveState slaveState = SLAVE_INIT;
 // ============================================================
 //  GLOBALS
 // ============================================================
-uint32_t irON[IR_BUF_SIZE];        uint16_t irON_len        = 0;
-uint32_t irOFF[IR_BUF_SIZE];       uint16_t irOFF_len       = 0;
-uint32_t irTEMP_UP[IR_BUF_SIZE];   uint16_t irTEMP_UP_len   = 0;
-uint32_t irTEMP_DOWN[IR_BUF_SIZE]; uint16_t irTEMP_DOWN_len = 0;
+uint16_t irON[IR_BUF_SIZE];        uint16_t irON_len        = 0;
+uint16_t irOFF[IR_BUF_SIZE];       uint16_t irOFF_len       = 0;
+uint16_t irTEMP_UP[IR_BUF_SIZE];   uint16_t irTEMP_UP_len   = 0;
+uint16_t irTEMP_DOWN[IR_BUF_SIZE]; uint16_t irTEMP_DOWN_len = 0;
 
 bool irON_ready = false, irOFF_ready = false;
 bool irTEMP_UP_ready = false, irTEMP_DOWN_ready = false;
+
+// Reassembly buffer untuk merakit fragmen IR
+uint16_t reassemblyBuf[IR_BUF_SIZE];
+uint16_t reassemblyLen     = 0;
+uint8_t  reassemblyType    = 0;
+uint8_t  reassemblyExpect  = 0;  // jumlah fragmen yang diharapkan
+uint8_t  reassemblyGot     = 0;  // jumlah fragmen yang sudah diterima
 
 uint8_t  registeredCards[MAX_CARDS][4];
 uint8_t  cardCount    = 0;
@@ -257,10 +276,10 @@ bool deleteOneCard(uint8_t* uid) {
 
 void saveIRData() {
     prefs.begin("irdata", false);
-    prefs.putBytes("irON",  irON,  irON_len  * sizeof(uint32_t)); prefs.putUShort("irON_len",  irON_len);
-    prefs.putBytes("irOFF", irOFF, irOFF_len * sizeof(uint32_t)); prefs.putUShort("irOFF_len", irOFF_len);
-    prefs.putBytes("irUP",  irTEMP_UP,   irTEMP_UP_len   * sizeof(uint32_t)); prefs.putUShort("irUP_len",  irTEMP_UP_len);
-    prefs.putBytes("irDN",  irTEMP_DOWN, irTEMP_DOWN_len * sizeof(uint32_t)); prefs.putUShort("irDN_len",  irTEMP_DOWN_len);
+    prefs.putBytes("irON",  irON,  irON_len  * sizeof(uint16_t)); prefs.putUShort("irON_len",  irON_len);
+    prefs.putBytes("irOFF", irOFF, irOFF_len * sizeof(uint16_t)); prefs.putUShort("irOFF_len", irOFF_len);
+    prefs.putBytes("irUP",  irTEMP_UP,   irTEMP_UP_len   * sizeof(uint16_t)); prefs.putUShort("irUP_len",  irTEMP_UP_len);
+    prefs.putBytes("irDN",  irTEMP_DOWN, irTEMP_DOWN_len * sizeof(uint16_t)); prefs.putUShort("irDN_len",  irTEMP_DOWN_len);
     prefs.end();
     Serial.println("[NVS] IR data tersimpan");
 }
@@ -271,10 +290,10 @@ void loadIRData() {
     irOFF_len       = prefs.getUShort("irOFF_len", 0);
     irTEMP_UP_len   = prefs.getUShort("irUP_len", 0);
     irTEMP_DOWN_len = prefs.getUShort("irDN_len", 0);
-    if (irON_len)        { prefs.getBytes("irON",  irON,  irON_len*4);        irON_ready=true; }
-    if (irOFF_len)       { prefs.getBytes("irOFF", irOFF, irOFF_len*4);       irOFF_ready=true; }
-    if (irTEMP_UP_len)   { prefs.getBytes("irUP",  irTEMP_UP,   irTEMP_UP_len*4);   irTEMP_UP_ready=true; }
-    if (irTEMP_DOWN_len) { prefs.getBytes("irDN",  irTEMP_DOWN, irTEMP_DOWN_len*4); irTEMP_DOWN_ready=true; }
+    if (irON_len)        { prefs.getBytes("irON",  irON,  irON_len * sizeof(uint16_t));        irON_ready=true; }
+    if (irOFF_len)       { prefs.getBytes("irOFF", irOFF, irOFF_len * sizeof(uint16_t));       irOFF_ready=true; }
+    if (irTEMP_UP_len)   { prefs.getBytes("irUP",  irTEMP_UP,   irTEMP_UP_len * sizeof(uint16_t));   irTEMP_UP_ready=true; }
+    if (irTEMP_DOWN_len) { prefs.getBytes("irDN",  irTEMP_DOWN, irTEMP_DOWN_len * sizeof(uint16_t)); irTEMP_DOWN_ready=true; }
     prefs.end();
     Serial.printf("[NVS] IR: ON=%d OFF=%d UP=%d DN=%d\n",
         irON_len, irOFF_len, irTEMP_UP_len, irTEMP_DOWN_len);
@@ -342,12 +361,9 @@ float calculateSetTemp(int n) {
     return t;
 }
 
-void sendIR(uint32_t* data, uint16_t len) {
+void sendIR(uint16_t* data, uint16_t len) {
     if (len == 0 || data == nullptr) return;
-    uint16_t buf[IR_BUF_SIZE];
-    for (int i = 0; i < len && i < IR_BUF_SIZE; i++)
-        buf[i] = (uint16_t)(data[i]);
-    irsend.sendRaw(buf, len, 38);
+    irsend.sendRaw(data, len, 38);
 }
 
 void sendACOn()    { if (irON_ready)        { sendIR(irON, irON_len);               Serial.println("[IR] AC ON"); } }
@@ -399,10 +415,6 @@ void reportToMaster() {
 void onDataRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
     lastMasterSeen = millis();
 
-    uint8_t recvCh = 0;
-    esp_wifi_get_channel(&recvCh, nullptr);
-    if (recvCh == 0) recvCh = 1;
-
     // ── Pairing: terima ping master (9 byte: magic 0xAC57 + channel + MAC) ─
     if (len == 9 && !masterKnown && data[0] == 0xAC && data[1] == 0x57) {
         uint8_t masterChannel = data[2];          // channel master dari packet
@@ -448,40 +460,68 @@ void onDataRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
         return;
     }
 
-    // CMD
-    if (len == sizeof(MasterCommand)) {
-        MasterCommand cmd; memcpy(&cmd, data, sizeof(MasterCommand));
+    // ── Fragmen IR: terima dan rakit ulang ─────────────────────
+    if (len >= 8 && data[0] == CMD_IR_FRAG) {
+        IRFragment frag; memset(&frag, 0, sizeof(frag));
+        // Salin hanya sebanyak data yang diterima
+        memcpy(&frag, data, min((int)len, (int)sizeof(IRFragment)));
+        
+        Serial.printf("[IR-FRAG] Terima frag %d/%d type=%d len=%d\n", 
+            frag.fragIndex+1, frag.fragTotal, frag.irType, frag.offsetLen);
+        
+        // Jika ini fragmen pertama, reset buffer reassembly
+        if (frag.fragIndex == 0) {
+            memset(reassemblyBuf, 0, sizeof(reassemblyBuf));
+            reassemblyLen    = 0;
+            reassemblyType   = frag.irType;
+            reassemblyExpect = frag.fragTotal;
+            reassemblyGot    = 0;
+        }
+        
+        // Salin data fragmen ke posisi yang tepat di buffer reassembly
+        int offset = frag.fragIndex * FRAG_PAYLOAD;
+        if (offset + frag.offsetLen <= IR_BUF_SIZE) {
+            memcpy(&reassemblyBuf[offset], frag.data, frag.offsetLen * sizeof(uint16_t));
+            reassemblyLen = offset + frag.offsetLen;
+            reassemblyGot++;
+        }
+        
+        // Jika semua fragmen sudah diterima, salin ke buffer IR yang sesuai
+        if (reassemblyGot >= reassemblyExpect) {
+            Serial.printf("[IR-FRAG] Semua fragmen diterima! type=%d totalLen=%d\n", reassemblyType, reassemblyLen);
+            switch (reassemblyType) {
+                case IR_TYPE_ON:
+                    memcpy(irON, reassemblyBuf, reassemblyLen * sizeof(uint16_t));
+                    irON_len = reassemblyLen; irON_ready = true;
+                    Serial.printf("[IR] Terima ON len=%d\n", irON_len); break;
+                case IR_TYPE_OFF:
+                    memcpy(irOFF, reassemblyBuf, reassemblyLen * sizeof(uint16_t));
+                    irOFF_len = reassemblyLen; irOFF_ready = true;
+                    Serial.printf("[IR] Terima OFF len=%d\n", irOFF_len); break;
+                case IR_TYPE_TEMP_UP:
+                    memcpy(irTEMP_UP, reassemblyBuf, reassemblyLen * sizeof(uint16_t));
+                    irTEMP_UP_len = reassemblyLen; irTEMP_UP_ready = true;
+                    Serial.printf("[IR] Terima TEMP_UP len=%d\n", irTEMP_UP_len); break;
+                case IR_TYPE_TEMP_DOWN:
+                    memcpy(irTEMP_DOWN, reassemblyBuf, reassemblyLen * sizeof(uint16_t));
+                    irTEMP_DOWN_len = reassemblyLen; irTEMP_DOWN_ready = true;
+                    Serial.printf("[IR] Terima TEMP_DOWN len=%d\n", irTEMP_DOWN_len); break;
+            }
+            if (irON_ready && irOFF_ready && irTEMP_UP_ready && irTEMP_DOWN_ready) {
+                saveIRData();
+                irAllReady = true;
+            }
+        }
+        return;
+    }
+
+    // ── SmallCommand: perintah non-IR ──────────────────────────
+    if (len == sizeof(SmallCommand)) {
+        SmallCommand cmd; memcpy(&cmd, data, sizeof(SmallCommand));
         switch (cmd.cmd) {
             case CMD_PING:
                 reportNow = true;
                 break;
-
-            case CMD_SEND_IR: {
-                switch (cmd.irType) {
-                    case IR_TYPE_ON:
-                        memcpy(irON, cmd.irData, cmd.irLen*4);
-                        irON_len=cmd.irLen; irON_ready=true;
-                        Serial.printf("[IR] Terima ON len=%d\n", irON_len); break;
-                    case IR_TYPE_OFF:
-                        memcpy(irOFF, cmd.irData, cmd.irLen*4);
-                        irOFF_len=cmd.irLen; irOFF_ready=true;
-                        Serial.printf("[IR] Terima OFF len=%d\n", irOFF_len); break;
-                    case IR_TYPE_TEMP_UP:
-                        memcpy(irTEMP_UP, cmd.irData, cmd.irLen*4);
-                        irTEMP_UP_len=cmd.irLen; irTEMP_UP_ready=true;
-                        Serial.printf("[IR] Terima TEMP_UP len=%d\n", irTEMP_UP_len); break;
-                    case IR_TYPE_TEMP_DOWN:
-                        memcpy(irTEMP_DOWN, cmd.irData, cmd.irLen*4);
-                        irTEMP_DOWN_len=cmd.irLen; irTEMP_DOWN_ready=true;
-                        Serial.printf("[IR] Terima TEMP_DOWN len=%d\n", irTEMP_DOWN_len); break;
-                }
-                if (irON_ready && irOFF_ready && irTEMP_UP_ready && irTEMP_DOWN_ready) {
-                    saveIRData();
-                    // feedback dan AC ON dilakukan dari loop via flag
-                    irAllReady = true;
-                }
-                break;
-            }
 
             case CMD_ENROLL_START:
                 enrollMode    = true;
@@ -593,6 +633,7 @@ void setup() {
 
     WiFi.mode(WIFI_STA);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    esp_wifi_set_ps(WIFI_PS_NONE); // Disable WiFi Power Save untuk cegah Interrupt WDT
     WiFi.disconnect();
     delay(100);
 
@@ -609,7 +650,9 @@ void setup() {
     if (masterKnown) {
         uint8_t savedCh = 0;
         prefs.begin("sys", true); savedCh = prefs.getUChar("channel", 1); prefs.end();
+        esp_wifi_set_promiscuous(true);
         esp_wifi_set_channel(savedCh, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_promiscuous(false);
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, masterMac, 6);
         peer.channel = savedCh; peer.encrypt = false;
@@ -636,7 +679,9 @@ void setup() {
         bool paired = false;
         for (int round = 0; round < 5 && !paired; round++) {
             for (int ch = 1; ch <= 13 && !paired; ch++) {
+                esp_wifi_set_promiscuous(true);
                 esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+                esp_wifi_set_promiscuous(false);
                 if (esp_now_is_peer_exist(broadcast)) esp_now_del_peer(broadcast);
                 esp_now_peer_info_t bcastPeer = {};
                 memcpy(bcastPeer.peer_addr, broadcast, 6);
