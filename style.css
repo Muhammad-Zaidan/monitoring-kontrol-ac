@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fondamento:ital@0;1&family=Roboto:ital,wght@0,100..900;1,100..900&display=swap');
 
 :root {
   --bg: #fdf2f8;
@@ -30,7 +30,7 @@
   --radius: 14px;
   --radius-sm: 10px;
   --radius-xs: 6px;
-  --mono: 'JetBrains Mono', monospace;
+  --mono: 'Roboto', monospace;
   --sans: 'Inter', sans-serif;
   --transition: all 0.25s cubic-bezier(.4,0,.2,1);
 }
