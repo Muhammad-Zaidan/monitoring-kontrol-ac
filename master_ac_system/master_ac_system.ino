@@ -1,32 +1,28 @@
 /**
  * ============================================================
- *  Industrial AC Automation System — MASTER v5.0
+ *  Industrial AC Automation System — MASTER v5.1
  *
- *  Perubahan v5.0:
- *    - Hapus fast-path hardcode MAC → pairing wajib setelah factory reset
+ *  Perubahan v5.1:
+ *    - Adaptasi 1 PZEM (dari 3 PZEM)
+ *    - Optimasi pembacaan PZEM: flush buffer + retry 3x
+ *    - Stack background task diperbesar (16KB)
+ *
+ *  Fitur (dari v5.0):
+ *    - SmallCommand (7 byte) untuk perintah non-IR
+ *    - IRFragment untuk kirim data IR terpotong (maks 238 byte/paket)
  *    - Mode Auto/Manual via Firebase: polling /control tiap 3 detik
- *    - Command baru: AC ON/OFF, TEMP UP/DOWN, SET MODE
- *    - SlavePayload tambah acState
- *    - Realtime Firebase tambah field mode dan acState
- *
- *  Perubahan v4.3:
- *    - Navigasi idle: UP/DOWN scroll manual, OK masuk menu
- *    - Force read PZEM saat ganti channel (tidak ada delay tampil)
- *    - Struktur Firebase: realtime (tiap 15 detik) + historis (tiap 5 menit)
- *    - Auto delete historis Firebase > 30 hari
- *    - SD sync dari Firebase saat SD dipasang kembali
- *    - Stabilitas ESP-NOW: watchdog ping slave tiap 5 detik
- *    - Feedback enroll lebih jelas di LCD (berhasil/duplikat/penuh)
- *    - SlavePayload tambah field enrollStatus untuk feedback enroll
- *    - Setpoint suhu dibulatkan ke integer
- *    - Fix: UP/DOWN di idle tidak masuk menu
+ *    - Command: AC ON/OFF, TEMP UP/DOWN, SET MODE
+ *    - SlavePayload + acState
+ *    - Fast-path hardcode MAC slave #0
+ *    - Firebase realtime + historis + auto-delete > 30 hari
+ *    - SD sync, watchdog ping, feedback enroll
  *
  *  Tools → Partition Scheme → Huge APP (3MB No OTA/1MB SPIFFS)
  *  ESP32 Core 3.x
  *
  *  Hardware:
  *    ESP32, LCD 20x4 I2C 0x27 (SDA:21 SCL:22)
- *    PZEM-004T x3 Serial2 RX:16 TX:17 addr 0x01-0x03
+ *    PZEM-004T x1 Serial2 RX:16 TX:17 addr 0x01
  *    RTC DS3231 I2C, SD SPI CS:5
  *    IR Receiver GPIO4
  *    BTN UP:32  DOWN:33  OK:34  (pull-up eksternal, aktif LOW)
@@ -94,7 +90,7 @@
 #define ENROLL_FULL       3
 
 // ============================================================
-//  STRUCTS
+//  STRUCTS — harus IDENTIK dengan slave v2.0
 // ============================================================
 // SmallCommand: untuk perintah non-IR (PING, ENROLL, AC_ON/OFF, dll)
 // Ukuran sangat kecil, jauh di bawah batas 250 byte ESP-NOW
@@ -206,11 +202,11 @@ const char*         menuItems[]      = {
     "7.Reset Pabrik"
 };
 
-// IDLE
-int                 idleView         = 0;  // 0-2=power CH1-3, 3=detail slave
-int                 idlePowerCh      = 0;
+// IDLE — 2 tampilan: 0=POWER CH1, 1=Detail Slave
+int                 idleView         = 0;
 unsigned long       lastIdleScroll   = 0;
 unsigned long       lastIdleRefresh  = 0;
+#define IDLE_VIEW_COUNT 2
 
 // Force read PZEM saat ganti channel
 volatile bool       forceReadPzem    = false;
@@ -220,12 +216,12 @@ struct RunText { String text; int pos; unsigned long lastTick; };
 RunText             runRow[4];
 bool                runActive[4]     = {false};
 
-// PZEM cache
-float               pzem_v[3]  = {0};
-float               pzem_i[3]  = {0};
-float               pzem_p[3]  = {0};
-float               pzem_pf[3] = {0};
-float               pzem_e[3]  = {0};
+// PZEM cache — hanya 1 channel
+float               pzem_v  = 0;
+float               pzem_i  = 0;
+float               pzem_p  = 0;
+float               pzem_pf = 0;
+float               pzem_e  = 0;
 SemaphoreHandle_t   pzemMutex;
 
 // Pairing
@@ -276,8 +272,6 @@ SemaphoreHandle_t   lcdMutex;
 // Hardware
 Preferences         prefs;
 PZEM004Tv30         pzem1(Serial2, PZEM_RX, PZEM_TX, 0x01);
-PZEM004Tv30         pzem2(Serial2, PZEM_RX, PZEM_TX, 0x02);
-PZEM004Tv30         pzem3(Serial2, PZEM_RX, PZEM_TX, 0x03);
 RTC_DS3231          rtc;
 LiquidCrystal_I2C   lcd(0x27, 20, 4);
 IRrecv              irrecv(IR_RECEIVE_PIN, 1024, 50, true);
@@ -447,7 +441,7 @@ void factoryReset() {
 }
 
 // ============================================================
-//  ESP-NOW
+//  ESP-NOW — SmallCommand + IRFragment
 // ============================================================
 void sendSmallCmd(int idx, SmallCommand &cmd) {
     if (idx < 0 || idx >= slaveCount) return;
@@ -456,9 +450,9 @@ void sendSmallCmd(int idx, SmallCommand &cmd) {
 
 void sendIRFragmented(int idx, uint8_t irType, uint16_t* irData, uint16_t irLen) {
     if (idx < 0 || idx >= slaveCount || irLen == 0) return;
-    int fragTotal = (irLen + FRAG_PAYLOAD - 1) / FRAG_PAYLOAD; // hitung jumlah fragmen
+    int fragTotal = (irLen + FRAG_PAYLOAD - 1) / FRAG_PAYLOAD;
     Serial.printf("[IR-FRAG] Kirim irType=%d len=%d dalam %d fragmen\n", irType, irLen, fragTotal);
-    
+
     for (int f = 0; f < fragTotal; f++) {
         IRFragment frag; memset(&frag, 0, sizeof(frag));
         frag.cmd       = CMD_IR_FRAG;
@@ -466,12 +460,12 @@ void sendIRFragmented(int idx, uint8_t irType, uint16_t* irData, uint16_t irLen)
         frag.fragIndex = f;
         frag.fragTotal = fragTotal;
         frag.totalLen  = irLen;
-        
+
         int offset = f * FRAG_PAYLOAD;
         int remaining = irLen - offset;
         frag.offsetLen = (remaining > FRAG_PAYLOAD) ? FRAG_PAYLOAD : remaining;
         memcpy(frag.data, &irData[offset], frag.offsetLen * sizeof(uint16_t));
-        
+
         // Kirim hanya sebesar data yang terisi, bukan seluruh struct
         size_t sendSize = 8 + frag.offsetLen * sizeof(uint16_t); // 8 byte header
         esp_now_send(slaves[idx].mac, (uint8_t*)&frag, sendSize);
@@ -524,10 +518,11 @@ void onDataRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
                 memcpy(&slaveData[i], data, sizeof(SlavePayload));
                 slaveLastSeen[i] = millis();
 
-                Serial.printf("[SLAVE %d] T:%.1f H:%.1f N:%d Tset:%.1f Cards:%d Enroll:%d\n",
+                Serial.printf("[SLAVE %d] T:%.1f H:%.1f N:%d Tset:%.1f Cards:%d Enroll:%d AC:%d\n",
                     i, slaveData[i].temp, slaveData[i].hum,
                     slaveData[i].personCount, slaveData[i].setTemp,
-                    slaveData[i].cardCount, slaveData[i].enrollStatus);
+                    slaveData[i].cardCount, slaveData[i].enrollStatus,
+                    slaveData[i].acState);
 
                 // Handle feedback enroll
                 if (appState == STATE_MENU_ENROLL_WAIT && enrollTarget == i) {
@@ -611,18 +606,13 @@ void saveIRToSlave(int idx, IrLearningStep step) {
 }
 
 // ============================================================
-//  IDLE SCROLL — Manual dan Otomatis
+//  IDLE SCROLL
 // ============================================================
-// idleView: 0=CH1, 1=CH2, 2=CH3, 3=Detail Slave
-// Total view: 4 (CH1, CH2, CH3, Detail)
-#define IDLE_VIEW_COUNT 4
-
 void goToIdleView(int view) {
     stopAllRunText();
-    idleView    = view;
-    if (idleView < 3) {
-        idlePowerCh = idleView;
-        forceReadPzem = true; // paksa baca PZEM segera
+    idleView = view;
+    if (idleView == 0) {
+        forceReadPzem = true;
         renderIdlePower();
     } else {
         renderIdleDetail();
@@ -645,14 +635,11 @@ void scrollIdlePrev() {
 void refreshIdlePowerData() {
     char buf[21];
     if (xSemaphoreTake(pzemMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
-        snprintf(buf, sizeof(buf), "V:%-5.1fV  I:%-5.2fA",
-            pzem_v[idlePowerCh], pzem_i[idlePowerCh]);
+        snprintf(buf, sizeof(buf), "V:%-5.1fV  I:%-5.2fA", pzem_v, pzem_i);
         lcdPrint(0, 1, buf);
-        snprintf(buf, sizeof(buf), "P:%-6.1fW PF:%-4.2f",
-            pzem_p[idlePowerCh], pzem_pf[idlePowerCh]);
+        snprintf(buf, sizeof(buf), "P:%-6.1fW PF:%-4.2f", pzem_p, pzem_pf);
         lcdPrint(0, 2, buf);
-        snprintf(buf, sizeof(buf), "E:%-7.3fkWh SD:%-3s",
-            pzem_e[idlePowerCh], sdReady ? "OK" : "ERR");
+        snprintf(buf, sizeof(buf), "E:%-7.3fkWh SD:%-3s", pzem_e, sdReady ? "OK" : "ERR");
         lcdPrint(0, 3, buf);
         xSemaphoreGive(pzemMutex);
         lastIdleRefresh = millis();
@@ -663,17 +650,14 @@ void renderIdlePower() {
     stopAllRunText();
     char buf[21];
     lcdClear();
-    snprintf(buf, sizeof(buf), "=== POWER CH%d ===", idlePowerCh + 1);
+    snprintf(buf, sizeof(buf), "==== POWER CH1 ====");
     lcdPrint(0, 0, buf);
     if (xSemaphoreTake(pzemMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
-        snprintf(buf, sizeof(buf), "V:%-5.1fV  I:%-5.2fA",
-            pzem_v[idlePowerCh], pzem_i[idlePowerCh]);
+        snprintf(buf, sizeof(buf), "V:%-5.1fV  I:%-5.2fA", pzem_v, pzem_i);
         lcdPrint(0, 1, buf);
-        snprintf(buf, sizeof(buf), "P:%-6.1fW PF:%-4.2f",
-            pzem_p[idlePowerCh], pzem_pf[idlePowerCh]);
+        snprintf(buf, sizeof(buf), "P:%-6.1fW PF:%-4.2f", pzem_p, pzem_pf);
         lcdPrint(0, 2, buf);
-        snprintf(buf, sizeof(buf), "E:%-7.3fkWh SD:%-3s",
-            pzem_e[idlePowerCh], sdReady ? "OK" : "ERR");
+        snprintf(buf, sizeof(buf), "E:%-7.3fkWh SD:%-3s", pzem_e, sdReady ? "OK" : "ERR");
         lcdPrint(0, 3, buf);
         xSemaphoreGive(pzemMutex);
     }
@@ -727,8 +711,8 @@ void renderIdleDetail() {
 void tickIdleScroll() {
     tickRunText();
     if (millis() - lastIdleRefresh >= IDLE_REFRESH_MS) {
-        if (idleView < 3) refreshIdlePowerData();
-        else              refreshIdleDetailData();
+        if (idleView == 0) refreshIdlePowerData();
+        else               refreshIdleDetailData();
     }
     if (millis() - lastIdleScroll >= IDLE_SCROLL_MS) {
         scrollIdleNext();
@@ -891,36 +875,49 @@ void taskBackground(void* param) {
 
     for (;;) {
 
-        // ── PZEM Read ──────────────────────────────────────────
+        // ── PZEM Read (1 channel) ────────────────────────────────
         bool doRead = (millis() - lastPzem > PZEM_READ_MS) || forceReadPzem;
         if (doRead
             && appState != STATE_SLAVE_PAIRING
             && appState != STATE_MENU_ADD_SLAVE) {
             lastPzem      = millis();
             forceReadPzem = false;
-            PZEM004Tv30* pzems[3] = {&pzem1, &pzem2, &pzem3};
             if (xSemaphoreTake(pzemMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-                for (int ch = 0; ch < 3; ch++) {
-                    float v = pzems[ch]->voltage();
-                    if (!isnan(v)) {
-                        float ci = pzems[ch]->current();
-                        float p  = pzems[ch]->power();
-                        float pf = pzems[ch]->pf();
-                        float e  = pzems[ch]->energy();
-                        Serial.printf("[PZEM%d RAW] V:%.1f I:%.3f P:%.1f PF:%.2f\n", ch+1, v, isnan(ci)?-1:ci, isnan(p)?-1:p, isnan(pf)?-1:pf);
-                        pzem_v[ch]  = v;
-                        pzem_i[ch]  = isnan(ci) ? 0 : ci;
-                        pzem_p[ch]  = isnan(p)  ? 0 : p;
-                        pzem_pf[ch] = isnan(pf) ? 0 : pf;
-                        pzem_e[ch]  = isnan(e)  ? 0 : e;
-                        logToSDQueue("PZEM" + String(ch+1)
-                            + "," + String(pzem_v[ch], 1)
-                            + "," + String(pzem_i[ch], 2)
-                            + "," + String(pzem_p[ch], 1)
-                            + "," + String(pzem_pf[ch], 2)
-                            + "," + String(pzem_e[ch], 3));
+                // Flush sisa data di buffer Serial2
+                while (Serial2.available()) Serial2.read();
+                vTaskDelay(pdMS_TO_TICKS(100));
+
+                // Retry hingga 3 kali jika voltage NaN
+                float v = NAN;
+                for (int retry = 0; retry < 3 && isnan(v); retry++) {
+                    if (retry > 0) {
+                        Serial.printf("[PZEM1] Retry %d...\n", retry);
+                        while (Serial2.available()) Serial2.read();
+                        vTaskDelay(pdMS_TO_TICKS(200));
                     }
-                    vTaskDelay(pdMS_TO_TICKS(30));
+                    v = pzem1.voltage();
+                }
+
+                if (!isnan(v)) {
+                    float ci = pzem1.current();
+                    float p  = pzem1.power();
+                    float pf = pzem1.pf();
+                    float e  = pzem1.energy();
+                    Serial.printf("[PZEM1 RAW] V:%.1f I:%.3f P:%.1f PF:%.2f\n",
+                        v, isnan(ci)?-1:ci, isnan(p)?-1:p, isnan(pf)?-1:pf);
+                    pzem_v  = v;
+                    pzem_i  = isnan(ci) ? 0 : ci;
+                    pzem_p  = isnan(p)  ? 0 : p;
+                    pzem_pf = isnan(pf) ? 0 : pf;
+                    pzem_e  = isnan(e)  ? 0 : e;
+                    logToSDQueue("PZEM1"
+                        "," + String(pzem_v, 1)
+                        + "," + String(pzem_i, 2)
+                        + "," + String(pzem_p, 1)
+                        + "," + String(pzem_pf, 2)
+                        + "," + String(pzem_e, 3));
+                } else {
+                    Serial.println("[PZEM1] GAGAL baca setelah 3 retry!");
                 }
                 xSemaphoreGive(pzemMutex);
             }
@@ -959,7 +956,7 @@ void taskBackground(void* param) {
                         } else {
                             timestamp = "NORTC+" + String(millis() / 1000) + "s";
                         }
-                        // Buat direktori satu level per satu (SD library tidak support nested mkdir)
+                        // Buat direktori satu level per satu
                         String year  = "/" + (rtcReady ? String(rtc.now().year())  : String("NORTC"));
                         String month = year + "/" + (rtcReady ? String(rtc.now().month()) : String("0"));
                         if (!SD.exists(year))  SD.mkdir(year);
@@ -987,17 +984,15 @@ void taskBackground(void* param) {
             WiFiClientSecure client; client.setInsecure(); client.setTimeout(3);
             HTTPClient http; http.setTimeout(3000);
 
-            // Bangun JSON realtime
+            // Bangun JSON realtime — 1 PZEM
             String json = "{";
             if (xSemaphoreTake(pzemMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                for (int ch = 0; ch < 3; ch++) {
-                    json += "\"pzem" + String(ch+1) + "\":{";
-                    json += "\"v\":" + String(pzem_v[ch], 1) + ",";
-                    json += "\"i\":" + String(pzem_i[ch], 2) + ",";
-                    json += "\"p\":" + String(pzem_p[ch], 1) + ",";
-                    json += "\"pf\":" + String(pzem_pf[ch], 2) + ",";
-                    json += "\"e\":" + String(pzem_e[ch], 3) + "},";
-                }
+                json += "\"pzem1\":{";
+                json += "\"v\":" + String(pzem_v, 1) + ",";
+                json += "\"i\":" + String(pzem_i, 2) + ",";
+                json += "\"p\":" + String(pzem_p, 1) + ",";
+                json += "\"pf\":" + String(pzem_pf, 2) + ",";
+                json += "\"e\":" + String(pzem_e, 3) + "},";
                 xSemaphoreGive(pzemMutex);
             }
             for (int s = 0; s < slaveCount; s++) {
@@ -1013,7 +1008,7 @@ void taskBackground(void* param) {
             }
             // Tambah field mode
             json += "\"mode\":\"" + currentMode + "\",";
-            // Tambahkan timestamp master (unix time dari RTC) agar web bisa deteksi master offline
+            // Timestamp master (unix time dari RTC)
             if (rtcReady) {
                 DateTime now2 = rtc.now();
                 json += "\"_masterTs\":" + String((long)now2.unixtime());
@@ -1040,13 +1035,11 @@ void taskBackground(void* param) {
 
             String json = "{";
             if (xSemaphoreTake(pzemMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                for (int ch = 0; ch < 3; ch++) {
-                    json += "\"pzem" + String(ch+1) + "\":{";
-                    json += "\"v\":" + String(pzem_v[ch], 1) + ",";
-                    json += "\"i\":" + String(pzem_i[ch], 2) + ",";
-                    json += "\"p\":" + String(pzem_p[ch], 1) + ",";
-                    json += "\"e\":" + String(pzem_e[ch], 3) + "},";
-                }
+                json += "\"pzem1\":{";
+                json += "\"v\":" + String(pzem_v, 1) + ",";
+                json += "\"i\":" + String(pzem_i, 2) + ",";
+                json += "\"p\":" + String(pzem_p, 1) + ",";
+                json += "\"e\":" + String(pzem_e, 3) + "},";
                 xSemaphoreGive(pzemMutex);
             }
             for (int s = 0; s < slaveCount; s++) {
@@ -1071,9 +1064,7 @@ void taskBackground(void* param) {
             WiFiClientSecure client; client.setInsecure(); client.setTimeout(3);
             HTTPClient http; http.setTimeout(3000);
             DateTime now = rtc.now();
-            // Hapus data 31+ hari yang lalu
             for (int d = 31; d <= 35; d++) {
-                // Hitung tanggal lama secara sederhana (tidak perlu presisi kalender)
                 long tsOld = now.unixtime() - (long)d * 86400L;
                 DateTime dtOld(tsOld);
                 String oldKey = getDateKey(dtOld);
@@ -1112,10 +1103,9 @@ void taskBackground(void* param) {
             String ctrlJson = firebaseGet(client2, http2, "/control");
             if (ctrlJson.length() > 2 && ctrlJson != "null") {
                 // Parse mode
-                int modeIdx = ctrlJson.indexOf("\"mode\"");
+                int modeIdx = ctrlJson.indexOf("\"current_mode\":");
                 if (modeIdx >= 0) {
                     int modeValStart = ctrlJson.indexOf(':', modeIdx) + 1;
-                    // Find the value between quotes
                     int q1 = ctrlJson.indexOf('"', modeValStart);
                     int q2 = ctrlJson.indexOf('"', q1 + 1);
                     if (q1 >= 0 && q2 > q1) {
@@ -1135,7 +1125,7 @@ void taskBackground(void* param) {
                 }
 
                 // Parse cmd
-                int cmdIdx = ctrlJson.indexOf("\"cmd\"");
+                int cmdIdx = ctrlJson.indexOf("\"cmd\":");
                 if (cmdIdx >= 0) {
                     int cmdValStart = ctrlJson.indexOf(':', cmdIdx) + 1;
                     int cq1 = ctrlJson.indexOf('"', cmdValStart);
@@ -1144,11 +1134,10 @@ void taskBackground(void* param) {
                         String cmdStr = ctrlJson.substring(cq1 + 1, cq2);
                         if (cmdStr != "none" && cmdStr.length() > 0) {
                             // Parse cmdTs untuk cek apakah command baru
-                            int tsIdx = ctrlJson.indexOf("\"cmdTs\"");
+                            int tsIdx = ctrlJson.indexOf("\"cmdTs\":");
                             unsigned long cmdTs = 0;
                             if (tsIdx >= 0) {
                                 int tsStart = ctrlJson.indexOf(':', tsIdx) + 1;
-                                // Skip whitespace
                                 while (tsStart < (int)ctrlJson.length() && ctrlJson[tsStart] == ' ') tsStart++;
                                 String tsStr = "";
                                 while (tsStart < (int)ctrlJson.length() && ctrlJson[tsStart] >= '0' && ctrlJson[tsStart] <= '9') {
@@ -1161,7 +1150,6 @@ void taskBackground(void* param) {
                                 lastCmdTs = cmdTs;
                                 Serial.printf("[CTRL] Perintah: %s\n", cmdStr.c_str());
 
-                                // Tentukan command ESP-NOW
                                 uint8_t espCmd = 0;
                                 if      (cmdStr == "ac_on")     espCmd = CMD_AC_ON;
                                 else if (cmdStr == "ac_off")    espCmd = CMD_AC_OFF;
@@ -1211,7 +1199,7 @@ void setup() {
     lcd.init();
     lcd.backlight();
     lcdClear();
-    lcdPrint(0, 0, "AC Monitor");
+    lcdPrint(0, 0, "AC Monitor v5.1");
     lcdPrint(0, 1, "Inisialisasi...");
     delay(1200);
 
@@ -1295,14 +1283,37 @@ void setup() {
     }
     delay(200);
 
-    Serial.println("[MASTER v5.0] Siap.");
+    Serial.println("[MASTER v5.1] Siap.");
     Serial.printf("[SLAVES] %d slave tersimpan\n", slaveCount);
 
-    // Pairing wajib setelah factory reset.
-    // Tidak ada fast path inject — slave harus ditemukan via broadcast.
+    // ── Fast path: inject slave #0 jika belum ada di NVS ─────────
+    // Slave #0 MAC: B0:CB:D8:E2:C8:44
+    static const uint8_t knownSlaveMac[6] = {0xB0,0xCB,0xD8,0xE2,0xC8,0x44};
+    bool slave0exists = false;
+    for (int i = 0; i < slaveCount; i++) {
+        if (memcmp(slaves[i].mac, knownSlaveMac, 6) == 0) {
+            slave0exists = true; break;
+        }
+    }
+    if (!slave0exists && slaveCount < MAX_SLAVES) {
+        Serial.println("[FAST] Inject slave #0 dari hardcode MAC");
+        memset(&slaves[slaveCount], 0, sizeof(SlaveConfig));
+        memcpy(slaves[slaveCount].mac, knownSlaveMac, 6);
+        snprintf(slaves[slaveCount].label, sizeof(slaves[slaveCount].label), "Slave 1");
+        slaves[slaveCount].active = true;
+        slaveCount++;
+        saveSlaves();
+        saveFirstRunDone();
+        // Register sebagai ESP-NOW peer
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, knownSlaveMac, 6);
+        peer.channel = 0; peer.encrypt = false;
+        if (!esp_now_is_peer_exist(knownSlaveMac)) esp_now_add_peer(&peer);
+        Serial.println("[FAST] Slave #0 terdaftar, langsung ke IDLE");
+    }
+    // ─────────────────────────────────────────────────────────────
 
     // Kirim ping ke semua slave tersimpan saat boot
-    // agar slave update channel ke channel WiFi aktif master
     if (slaveCount > 0) {
         uint8_t wifiCh = WiFi.channel();
         Serial.printf("[BOOT] Kirim ping ke %d slave di CH%d\n", slaveCount, wifiCh);
@@ -1315,7 +1326,7 @@ void setup() {
         }
     }
 
-    xTaskCreatePinnedToCore(taskBackground, "bgTask", 8192, nullptr, 1, nullptr, 0);
+    xTaskCreatePinnedToCore(taskBackground, "bgTask", 16384, nullptr, 1, nullptr, 0);
 
     if (isFirstRun() || slaveCount == 0) {
         lcdClear();
@@ -1342,7 +1353,6 @@ void loop() {
         && pairingWaiting && millis() - lastPairingPing > 2000) {
         lastPairingPing = millis();
         uint8_t bc[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-        // Format: magic[2] + channel[1] + MAC[6] = 9 byte
         uint8_t myMac[6];
         esp_wifi_get_mac(WIFI_IF_STA, myMac);
         uint8_t pingPkt[9] = {0xAC, 0x57, (uint8_t)WiFi.channel(), 0,0,0,0,0,0};

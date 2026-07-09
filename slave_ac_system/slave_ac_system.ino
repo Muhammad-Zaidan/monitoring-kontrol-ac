@@ -366,8 +366,8 @@ void sendIR(uint16_t* data, uint16_t len) {
     irsend.sendRaw(data, len, 38);
 }
 
-void sendACOn()    { if (irON_ready)        { sendIR(irON, irON_len);               Serial.println("[IR] AC ON"); } }
-void sendACOff()   { if (irOFF_ready)       { sendIR(irOFF, irOFF_len);             Serial.println("[IR] AC OFF"); } }
+void sendACOn()    { if (irOFF_ready)       { sendIR(irOFF, irOFF_len);             Serial.println("[IR] AC ON (Swapped with OFF)"); } }
+void sendACOff()   { if (irON_ready)        { sendIR(irON, irON_len);               Serial.println("[IR] AC OFF (Swapped with ON)"); } }
 void sendTempUp()  { if (irTEMP_UP_ready)   { sendIR(irTEMP_UP, irTEMP_UP_len);    Serial.println("[IR] TEMP UP"); } }
 void sendTempDown(){ if (irTEMP_DOWN_ready) { sendIR(irTEMP_DOWN, irTEMP_DOWN_len);Serial.println("[IR] TEMP DOWN"); } }
 
@@ -632,6 +632,11 @@ void setup() {
     // sehingga reconnect berikutnya cepat.
 
     WiFi.mode(WIFI_STA);
+    uint8_t baseMac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, baseMac);
+    Serial.printf("\n==================================\n");
+    Serial.printf("[SLAVE MAC ADDRESS]: %02X:%02X:%02X:%02X:%02X:%02X\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+    Serial.printf("==================================\n\n");
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
     esp_wifi_set_ps(WIFI_PS_NONE); // Disable WiFi Power Save untuk cegah Interrupt WDT
     WiFi.disconnect();

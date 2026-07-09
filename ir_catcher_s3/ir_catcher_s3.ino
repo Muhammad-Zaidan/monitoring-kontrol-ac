@@ -23,9 +23,9 @@
 #include <IRac.h>
 
 // ── PIN ──────────────────────────────────────────────────────
-#define PIN_IR   4
-#define OLED_SDA 8
-#define OLED_SCL 9
+#define PIN_IR   4   // (Bebas, GPIO4 bisa digunakan)
+#define OLED_SDA 21
+#define OLED_SCL 22
 
 // ── OLED (U8g2 SSD1306 I2C 128x64) ──────────────────────────
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);

@@ -9,6 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -87,21 +88,12 @@
   </div>
 
   <!-- PZEM Summary -->
-  <div class="section-title">Ringkasan Daya</div>
+  <div class="section-title">Pemantauan Listrik (PZEM)</div>
   <div class="cards-row cards-4">
-    <div class="card orange"><div class="card-label">Total Daya</div><div class="card-value" id="totalPower">--<span class="card-unit">W</span></div><div class="card-spark" id="sparkPower"></div></div>
-    <div class="card green"><div class="card-label">CH1 Tegangan</div><div class="card-value" id="v1">--<span class="card-unit">V</span></div><div class="card-spark" id="sparkV1"></div></div>
-    <div class="card green"><div class="card-label">CH2 Tegangan</div><div class="card-value" id="v2">--<span class="card-unit">V</span></div><div class="card-spark" id="sparkV2"></div></div>
-    <div class="card green"><div class="card-label">CH3 Tegangan</div><div class="card-value" id="v3">--<span class="card-unit">V</span></div><div class="card-spark" id="sparkV3"></div></div>
-  </div>
-
-  <!-- PZEM Table -->
-  <div class="pzem-table-wrap">
-    <div class="pzem-table-title">Detail PZEM — 3 Channel</div>
-    <table>
-      <thead><tr><th>Channel</th><th>Tegangan (V)</th><th>Arus (A)</th><th>Daya (W)</th><th>Power Factor</th><th>Energi (kWh)</th></tr></thead>
-      <tbody id="pzemTable"><tr><td colspan="6" style="color:var(--text-dim);text-align:center">Memuat data...</td></tr></tbody>
-    </table>
+    <div class="card orange"><div class="card-label">Daya Total</div><div class="card-value" id="totalPower">--<span class="card-unit">W</span></div><div class="card-spark" id="sparkPower"></div></div>
+    <div class="card green"><div class="card-label">Tegangan</div><div class="card-value" id="v1">--<span class="card-unit">V</span></div><div class="card-spark" id="sparkV1"></div></div>
+    <div class="card blue"><div class="card-label">Arus</div><div class="card-value" id="i1">--<span class="card-unit">A</span></div><div class="card-spark" id="sparkI1"></div></div>
+    <div class="card purple"><div class="card-label">Energi</div><div class="card-value" id="e1">--<span class="card-unit">kWh</span></div><div class="card-spark" id="sparkE1"></div></div>
   </div>
 
   <!-- Charts -->

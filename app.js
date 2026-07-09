@@ -6,7 +6,7 @@ const FIREBASE_AUTH = "DcOLsJQyQptHH7fTBvQGHQ1ClZpU1Oh9CKWgrttM";
 let charts = {};
 let historyData = { labels:[], temp:[], power:[], persons:[], hum:[], raw:[] };
 const SPARK_MAX = 20;
-const sparkData = { power:[], v1:[], v2:[], v3:[] };
+const sparkData = { power:[], v1:[], i1:[], e1:[] };
 let refreshCountdown = 15;
 let refreshInterval = null;
 let currentMode = 'auto'; // default mode
@@ -158,6 +158,8 @@ function updateCharts(labels, temp, power, persons, hum) {
 }
 
 // ── REALTIME ─────────────────────────────────────────────────
+const dangerAlertedSlaves = new Set();
+
 function renderSlaves(data) {
   const grid = document.getElementById('slaveGrid');
   const slaves = Object.entries(data).filter(([k]) => k.startsWith('Slave'));
@@ -165,6 +167,25 @@ function renderSlaves(data) {
     grid.innerHTML = '<div class="slave-card"><div class="slave-header"><div class="slave-name">Belum ada slave terhubung</div></div></div>';
     return;
   }
+  
+  slaves.forEach(([name, s]) => {
+    if (s.temp !== undefined && s.tset !== undefined) {
+      if (Math.abs(s.temp - s.tset) >= 10) {
+        if (!dangerAlertedSlaves.has(name)) {
+          dangerAlertedSlaves.add(name);
+          Swal.fire({
+            icon: 'error',
+            title: 'DANGER!',
+            html: `<b>${name.toUpperCase()} Error</b><br/>Suhu Aktual = ${s.temp.toFixed(1)}°C<br/>Suhu Setpoint = ${s.tset.toFixed(1)}°C`,
+            confirmButtonColor: '#ef4444'
+          });
+        }
+      } else {
+        dangerAlertedSlaves.delete(name);
+      }
+    }
+  });
+  
   grid.innerHTML = slaves.map(([name, s]) => `
     <div class="slave-card">
       <div class="slave-header">
@@ -185,16 +206,21 @@ function renderSlaves(data) {
 }
 
 function renderPzem(data) {
-  let total = 0;
-  [1,2,3].forEach(i => { const p = data['pzem'+i]; if(p) total += (p.p||0); });
+  // PZEM 1 Data
+  const p1 = data.pzem1 || {};
+  const total = p1.p || 0;
 
   // Sparkline data
   pushSpark('power', total);
-  for (let i=1;i<=3;i++) { const p=data['pzem'+i]; if(p) pushSpark('v'+i, p.v||0); }
+  pushSpark('v1', p1.v || 0);
+  pushSpark('i1', p1.i || 0);
+  pushSpark('e1', p1.e || 0);
 
   // Animated values
   animateValue('totalPower', total, 'W', 1);
-  for (let i=1;i<=3;i++) { const p=data['pzem'+i]; if(p) animateValue('v'+i, p.v||0, 'V', 1); }
+  animateValue('v1', p1.v || 0, 'V', 1);
+  animateValue('i1', p1.i || 0, 'A', 2);
+  animateValue('e1', p1.e || 0, 'kWh', 3);
 
   // Sparklines
   renderSparkline('sparkPower', sparkData.power, '#f97316');
@@ -377,8 +403,6 @@ async function exportXLSX() {
     'Waktu': r.waktu, 'Suhu (°C)': r.suhu, 'Kelembaban (%)': r.kelembaban,
     'Jumlah Orang': r.orang, 'Daya Total (W)': r.daya_total,
     'V CH1 (V)': r.v1, 'I CH1 (A)': r.i1, 'P CH1 (W)': r.p1,
-    'V CH2 (V)': r.v2, 'I CH2 (A)': r.i2, 'P CH2 (W)': r.p2,
-    'V CH3 (V)': r.v3, 'I CH3 (A)': r.i3, 'P CH3 (W)': r.p3,
   }));
   const ws1 = XLSX.utils.json_to_sheet(wsData);
   ws1['!cols'] = Array(14).fill({ wch: 16 });
@@ -564,8 +588,9 @@ async function sendCmd(cmd) {
   });
   
   try {
-    await fbPatch('/control', { cmd: cmd, cmdTs: Date.now() });
-    console.log(`[CMD] Kirim: ${cmd}`);
+    const tsSec = Math.floor(Date.now() / 1000);
+    await fbPatch('/control', { cmd: cmd, cmdTs: tsSec });
+    console.log(`[CMD] Kirim: ${cmd} (ts: ${tsSec})`);
     
     // Feedback visual singkat
     const btnMap = { ac_on: 'ctrlOn', ac_off: 'ctrlOff', temp_up: 'ctrlUp', temp_down: 'ctrlDown' };
