@@ -140,7 +140,7 @@ function makeChart(id, color, bgAlpha) {
 
 function initCharts() {
   charts.temp    = makeChart('chartTemp',    '#ef4444', '14');
-  charts.power   = makeChart('chartPower',   '#3b82f6', '14');
+  charts.power   = makeChart('chartPower',   '#ec4899', '14');
   charts.persons = makeChart('chartPersons', '#10b981', '14');
   charts.hum     = makeChart('chartHum',     '#f59e0b', '14');
 }
